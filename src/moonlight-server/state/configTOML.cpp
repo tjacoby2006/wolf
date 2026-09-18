@@ -424,7 +424,7 @@ Config load_or_default(const std::string &source,
                                                   gpu_cfg.weights,
                                                   gpu_cfg.excluded,
                                                   default_app_render_node);
-    gpu_balancer_atom->set(balancer);
+    gpu_balancer_atom->update([&](auto) { return balancer; });
 
     /* Build per-GPU encoder pipelines */
     auto pipelines = immer::map<std::string, PerGpuPipelines>();
@@ -556,7 +556,7 @@ Config load_or_default(const std::string &source,
                 get_vendor_name(gpu_vendor),
                 info.weight);
     }
-    gpu_pipelines_atom->set(pipelines);
+    gpu_pipelines_atom->update([&](auto) { return pipelines; });
   }
 
   return Config{.uuid = cfg.uuid,

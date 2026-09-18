@@ -258,7 +258,7 @@ void UnixSocketServer::endpoint_StreamSessionAdd(const HTTPRequest &req, std::sh
     auto pinned_node = choosen_app->render_node.empty()
                            ? std::nullopt
                            : std::optional<std::string>(choosen_app->render_node);
-    auto assigned_node = balancer_snapshot.pick(pinned_node);
+    auto assigned_node = balancer_snapshot->pick(pinned_node);
     if (!assigned_node) {
       logs::log(logs::error, "[API] No GPU available for app {}", choosen_app->base.title);
       auto res = GenericErrorResponse{.error = "No GPU available"};
@@ -268,7 +268,7 @@ void UnixSocketServer::endpoint_StreamSessionAdd(const HTTPRequest &req, std::sh
 
     /* Look up per-GPU pipelines */
     auto pipelines = state_->app_state->gpu_pipelines->load();
-    auto pipeline_it = pipelines.find(*assigned_node);
+    auto pipeline_it = pipelines->find(*assigned_node);
 
     /* Build a modified app with the assigned GPU and its pipelines */
     auto assigned_app = events::App{
@@ -456,7 +456,7 @@ void UnixSocketServer::endpoint_LobbyCreate(const wolf::api::HTTPRequest &req, s
     auto pinned_node = video_settings.runner_render_node.empty()
                            ? std::nullopt
                            : std::optional<std::string>(video_settings.runner_render_node);
-    auto assigned_node = balancer_snapshot.pick(pinned_node);
+    auto assigned_node = balancer_snapshot->pick(pinned_node);
     if (!assigned_node) {
       logs::log(logs::error, "[API] No GPU available for lobby");
       send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "No GPU available"}));
@@ -465,7 +465,7 @@ void UnixSocketServer::endpoint_LobbyCreate(const wolf::api::HTTPRequest &req, s
 
     /* Look up per-GPU pipelines */
     auto pipelines = state_->app_state->gpu_pipelines->load();
-    auto pipeline_it = pipelines.find(*assigned_node);
+    auto pipeline_it = pipelines->find(*assigned_node);
     if (pipeline_it) {
       video_settings.video_producer_buffer_caps = pipeline_it->video_producer_buffer_caps;
     }
@@ -694,8 +694,8 @@ void UnixSocketServer::endpoint_DockerInspectImage(const HTTPRequest &req, std::
 void UnixSocketServer::endpoint_Gpus(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
   auto balancer = state_->app_state->gpu_balancer->load();
   auto res = GpusResponse{};
-  for (const auto &[node, info] : balancer.pool) {
-    int usage = balancer.usage.count(node) ? balancer.usage.at(node) : 0;
+  for (const auto &[node, info] : balancer->pool) {
+    int usage = balancer->usage.count(node) ? balancer->usage.at(node) : 0;
     auto vendor = get_vendor(node);
     res.gpus.push_back(GpuInfoResponse{
         .render_node = node,
