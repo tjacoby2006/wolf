@@ -430,17 +430,17 @@ void launch(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
 
   /* GPU load balancing: pick a GPU for this app */
   auto balancer_snapshot = state->gpu_balancer->load();
-  auto pinned_node = app->render_node.empty() ? std::nullopt : std::optional<std::string>(app->render_node);
-  auto assigned_node = balancer_snapshot.pick(pinned_node);
+  auto pinned_node = (*app)->render_node.empty() ? std::nullopt : std::optional<std::string>((*app)->render_node);
+  auto assigned_node = balancer_snapshot->pick(pinned_node);
   if (!assigned_node) {
-    logs::log(logs::error, "[HTTP] No GPU available for app {}", app->base.title);
+    logs::log(logs::error, "[HTTP] No GPU available for app {}", (*app)->base.title);
     server_error<SimpleWeb::HTTPS>(response);
     return;
   }
 
   /* Look up per-GPU pipelines */
   auto pipelines = state->gpu_pipelines->load();
-  auto pipeline_it = pipelines.find(*assigned_node);
+  auto pipeline_it = pipelines->find(*assigned_node);
   if (pipeline_it == nullptr) {
     logs::log(logs::error,
               "[HTTP] No encoder pipelines built for GPU {}, falling back to app defaults",
@@ -450,17 +450,17 @@ void launch(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
 
   /* Build a modified app with the assigned GPU and its pipelines */
   auto assigned_app = events::App{
-      .base = app->base,
+      .base = (*app)->base,
       .video_producer_buffer_caps = pipeline_it ? pipeline_it->video_producer_buffer_caps
-                                                : app->video_producer_buffer_caps,
-      .h264_gst_pipeline = pipeline_it ? pipeline_it->h264_gst_pipeline : app->h264_gst_pipeline,
-      .hevc_gst_pipeline = pipeline_it ? pipeline_it->hevc_gst_pipeline : app->hevc_gst_pipeline,
-      .av1_gst_pipeline = pipeline_it ? pipeline_it->av1_gst_pipeline : app->av1_gst_pipeline,
+                                                : (*app)->video_producer_buffer_caps,
+      .h264_gst_pipeline = pipeline_it ? pipeline_it->h264_gst_pipeline : (*app)->h264_gst_pipeline,
+      .hevc_gst_pipeline = pipeline_it ? pipeline_it->hevc_gst_pipeline : (*app)->hevc_gst_pipeline,
+      .av1_gst_pipeline = pipeline_it ? pipeline_it->av1_gst_pipeline : (*app)->av1_gst_pipeline,
       .render_node = *assigned_node,
-      .opus_gst_pipeline = pipeline_it ? pipeline_it->opus_gst_pipeline : app->opus_gst_pipeline,
-      .start_virtual_compositor = app->start_virtual_compositor,
-      .start_audio_server = app->start_audio_server,
-      .runner = app->runner,
+      .opus_gst_pipeline = pipeline_it ? pipeline_it->opus_gst_pipeline : (*app)->opus_gst_pipeline,
+      .start_virtual_compositor = (*app)->start_virtual_compositor,
+      .start_audio_server = (*app)->start_audio_server,
+      .runner = (*app)->runner,
   };
 
   /* Atomically acquire the GPU */
