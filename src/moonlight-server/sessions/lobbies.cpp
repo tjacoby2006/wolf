@@ -83,7 +83,12 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         auto chosen = gpu_balancer->load()->pick(std::nullopt);
         if (!chosen.has_value()) {
           logs::log(logs::error, "[LOBBY] No available GPU for lobby {}", lobby_settings->id);
-          ev_bus->fire_event(immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby_settings->id}});
+          // Defer to a detached thread to avoid a nested fire_event under the same shared_lock,
+          // which can race with concurrent handlers modifying gpu_balancer / lobbies atoms.
+          auto lobby_id = lobby_settings->id;
+          std::thread([ev_bus, lobby_id]() {
+            ev_bus->fire_event(immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby_id}});
+          }).detach();
           return;
         }
 

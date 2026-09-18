@@ -101,8 +101,15 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         auto chosen = gpu_balancer->load()->pick(session->app->gpu_pin);
         if (!chosen.has_value()) {
           logs::log(logs::error, "[STREAM_SESSION] No available GPU for session {}", session->session_id);
-          session->event_bus->fire_event(
-              immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session->session_id}));
+          // Defer the StopStreamEvent to a detached thread to avoid firing it synchronously
+          // from within this handler. A nested fire_event runs under the same shared_lock and
+          // can race with concurrent StreamSession handlers on other HTTPS threads that are
+          // modifying plugged_devices_queue / gpu_balancer atoms simultaneously.
+          auto ev_bus = session->event_bus;
+          auto sid = session->session_id;
+          std::thread([ev_bus, sid]() {
+            ev_bus->fire_event(immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = sid}));
+          }).detach();
           return;
         }
         app_state->running_sessions->update([node = *chosen, id = session->session_id](const immer::vector<events::StreamSession> &ses_v) {
