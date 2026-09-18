@@ -96,15 +96,11 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
 
   // Run process and our custom wayland as soon as a new StreamSession is created
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StreamSession>>(
-      [&, gpu_balancer](const immer::box<events::StreamSession> &session) {
+      [&app_state, plugged_devices_queue, gpu_balancer, runtime_dir, audio_server](const immer::box<events::StreamSession> &session) {
         /* Assign a GPU to this session (pinned if the app requests one, otherwise load-balanced) */
         auto chosen = gpu_balancer->load()->pick(session->app->gpu_pin);
         if (!chosen.has_value()) {
           logs::log(logs::error, "[STREAM_SESSION] No available GPU for session {}", session->session_id);
-          // Defer the StopStreamEvent to a detached thread to avoid firing it synchronously
-          // from within this handler. A nested fire_event runs under the same shared_lock and
-          // can race with concurrent StreamSession handlers on other HTTPS threads that are
-          // modifying plugged_devices_queue / gpu_balancer atoms simultaneously.
           auto ev_bus = session->event_bus;
           auto sid = session->session_id;
           std::thread([ev_bus, sid]() {
