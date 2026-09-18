@@ -59,6 +59,19 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
 
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StopStreamEvent>>(
       [&app_state, plugged_devices_queue](const immer::box<events::StopStreamEvent> &ev) {
+        // Release the GPU that was assigned to this session
+        auto sessions = app_state->running_sessions->load();
+        for (const auto &s : sessions.get()) {
+          if (s.session_id == ev->session_id) {
+            auto render_node = s.app->render_node;
+            if (!render_node.empty()) {
+              app_state->gpu_balancer->update([&render_node](auto b) { return b.release(render_node); });
+              logs::log(logs::debug, "Released GPU {} from session {}", render_node, ev->session_id);
+            }
+            break;
+          }
+        }
+
         // Remove session from app state so that HTTP/S applist gets updated
         // This should effectively destroy the virtual Wayland session since it holds the last reference
         app_state->running_sessions->update([&ev](const immer::vector<events::StreamSession> &ses_v) {

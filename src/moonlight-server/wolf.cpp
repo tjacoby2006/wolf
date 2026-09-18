@@ -20,6 +20,7 @@
 #include <rtsp/net.hpp>
 #include <sessions/handlers.hpp>
 #include <state/config.hpp>
+#include <state/gpu_balancer.hpp>
 #include <streaming/streaming.hpp>
 #include <vector>
 
@@ -46,9 +47,11 @@ static void graceful_shutdown_handler(int signum) {
  */
 auto load_config(std::string_view config_file,
                  const std::shared_ptr<events::EventBusType> &ev_bus,
-                 state::SessionsAtoms running_sessions) {
+                 state::SessionsAtoms running_sessions,
+                 std::shared_ptr<immer::atom<state::GpuBalancer>> gpu_balancer_atom,
+                 std::shared_ptr<immer::atom<immer::map<std::string, state::PerGpuPipelines>>> gpu_pipelines_atom) {
   logs::log(logs::info, "Reading config file from: {}", config_file);
-  return state::load_or_default(config_file.data(), ev_bus, running_sessions);
+  return state::load_or_default(config_file.data(), ev_bus, running_sessions, gpu_balancer_atom, gpu_pipelines_atom);
 }
 
 state::Host get_host_config(std::string_view pkey_filename, std::string_view cert_filename) {
@@ -106,7 +109,9 @@ state::Host get_host_config(std::string_view pkey_filename, std::string_view cer
 auto initialize(std::string_view config_file, std::string_view pkey_filename, std::string_view cert_filename) {
   auto event_bus = std::make_shared<events::EventBusType>();
   auto running_sessions = std::make_shared<immer::atom<immer::vector<events::StreamSession>>>();
-  auto config = load_config(config_file, event_bus, running_sessions);
+  auto gpu_balancer_atom = std::make_shared<immer::atom<state::GpuBalancer>>();
+  auto gpu_pipelines_atom = std::make_shared<immer::atom<immer::map<std::string, state::PerGpuPipelines>>>();
+  auto config = load_config(config_file, event_bus, running_sessions, gpu_balancer_atom, gpu_pipelines_atom);
 
   auto host = get_host_config(pkey_filename, cert_filename);
   auto state = state::AppState{
@@ -116,7 +121,9 @@ auto initialize(std::string_view config_file, std::string_view pkey_filename, st
       .pairing_atom = std::make_shared<immer::atom<immer::map<std::string, immer::box<events::PairSignal>>>>(),
       .event_bus = event_bus,
       .lobbies = std::make_shared<immer::atom<immer::vector<events::Lobby>>>(),
-      .running_sessions = running_sessions};
+      .running_sessions = running_sessions,
+      .gpu_balancer = gpu_balancer_atom,
+      .gpu_pipelines = gpu_pipelines_atom};
   return immer::box<state::AppState>(state);
 }
 

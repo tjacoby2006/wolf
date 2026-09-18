@@ -84,7 +84,8 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                           .multi_user = lobby_settings->multi_user,
                           .pin = lobby_settings->pin,
                           .stop_when_everyone_leaves = lobby_settings->stop_when_everyone_leaves,
-                          .runner = lobby_settings->runner});
+                          .runner = lobby_settings->runner,
+                          .render_node = lobby_settings->video_settings.runner_render_node});
         app_state->lobbies->update(
             [lobby](const immer::vector<events::Lobby> &lobbies) { return lobbies.push_back(*lobby); });
 
@@ -273,6 +274,13 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           return;
         }
         logs::log(logs::info, "[LOBBY] stopping lobby {}", stop_lobby_event->lobby_id);
+
+        // Release the GPU assigned to this lobby
+        if (!lobby->render_node.empty()) {
+          app_state->gpu_balancer->update(
+              [render_node = lobby->render_node](auto b) { return b.release(render_node); });
+          logs::log(logs::debug, "[LOBBY] Released GPU {} from lobby {}", lobby->render_node, lobby->id);
+        }
 
         immer::vector<immer::box<std::string>> sessions = lobby->connected_sessions->load();
         for (auto &session_id : sessions) {

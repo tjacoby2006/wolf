@@ -19,10 +19,15 @@ using namespace wolf::config;
  * @brief Will load a configuration from the given source.
  *
  * If the source is not present, it'll provide some sensible defaults
+ *
+ * @param gpu_balancer_atom Output atom that will be populated with the GpuBalancer
+ * @param gpu_pipelines_atom Output atom that will be populated with per-GPU pipelines
  */
 Config load_or_default(const std::string &source,
                        const std::shared_ptr<events::EventBusType> &ev_bus,
-                       state::SessionsAtoms running_sessions);
+                       state::SessionsAtoms running_sessions,
+                       std::shared_ptr<immer::atom<state::GpuBalancer>> gpu_balancer_atom,
+                       std::shared_ptr<immer::atom<immer::map<std::string, state::PerGpuPipelines>>> gpu_pipelines_atom);
 
 /**
  * Side effect, will atomically update the paired clients list in cfg

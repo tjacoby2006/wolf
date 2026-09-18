@@ -321,6 +321,18 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
        .handler = [this](auto req, auto socket) { endpoint_DockerPullImage(req, socket); }});
 
   /**
+   * GPU info
+   */
+
+  state_->http.add(
+      HTTPMethod::GET,
+      "/api/v1/gpus",
+      {.summary = "Get GPU pool status",
+       .description = "Returns the list of GPUs in the pool with their weights, exclusions, and current usage counts.",
+       .response_description = {{200, {.json_schema = rfl::json::to_schema<GpusResponse>()}}},
+       .handler = [this](auto req, auto socket) { endpoint_Gpus(req, socket); }});
+
+  /**
    * OpenAPI schema
    */
 

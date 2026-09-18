@@ -1,8 +1,10 @@
 #include <api/api.hpp>
 #include <control/input_handler.hpp>
 #include <core/docker.hpp>
+#include <platforms/hw.hpp>
 #include <rtp/udp-ping.hpp>
 #include <state/config.hpp>
+#include <state/gpu_balancer.hpp>
 #include <state/sessions.hpp>
 #include <state/utils.hpp>
 
@@ -251,11 +253,48 @@ void UnixSocketServer::endpoint_StreamSessionAdd(const HTTPRequest &req, std::sh
                                                           "sh -c \"while :; do echo 'running...'; sleep 10; done\"")};
     }
 
+    /* GPU load balancing: pick a GPU for this app */
+    auto balancer_snapshot = state_->app_state->gpu_balancer->load();
+    auto pinned_node = choosen_app->render_node.empty()
+                           ? std::nullopt
+                           : std::optional<std::string>(choosen_app->render_node);
+    auto assigned_node = balancer_snapshot.pick(pinned_node);
+    if (!assigned_node) {
+      logs::log(logs::error, "[API] No GPU available for app {}", choosen_app->base.title);
+      auto res = GenericErrorResponse{.error = "No GPU available"};
+      send_http(socket, 500, rfl::json::write(res));
+      return;
+    }
+
+    /* Look up per-GPU pipelines */
+    auto pipelines = state_->app_state->gpu_pipelines->load();
+    auto pipeline_it = pipelines.find(*assigned_node);
+
+    /* Build a modified app with the assigned GPU and its pipelines */
+    auto assigned_app = events::App{
+        .base = choosen_app->base,
+        .video_producer_buffer_caps = pipeline_it ? pipeline_it->video_producer_buffer_caps
+                                                  : choosen_app->video_producer_buffer_caps,
+        .h264_gst_pipeline = pipeline_it ? pipeline_it->h264_gst_pipeline : choosen_app->h264_gst_pipeline,
+        .hevc_gst_pipeline = pipeline_it ? pipeline_it->hevc_gst_pipeline : choosen_app->hevc_gst_pipeline,
+        .av1_gst_pipeline = pipeline_it ? pipeline_it->av1_gst_pipeline : choosen_app->av1_gst_pipeline,
+        .render_node = *assigned_node,
+        .opus_gst_pipeline = pipeline_it ? pipeline_it->opus_gst_pipeline : choosen_app->opus_gst_pipeline,
+        .start_virtual_compositor = choosen_app->start_virtual_compositor,
+        .start_audio_server = choosen_app->start_audio_server,
+        .runner = choosen_app->runner,
+    };
+
+    /* Atomically acquire the GPU */
+    state_->app_state->gpu_balancer->update([&](auto b) { return b.acquire(*assigned_node); });
+
     config::PairedClient choosen_client;
     if (auto client_id = ss.client_id) {
       auto client = state::get_client_by_id(this->state_->app_state->config, *client_id);
       if (!client) {
         logs::log(logs::warning, "[API] Invalid client_id: {}", *client_id);
+        /* Release the GPU on error */
+        state_->app_state->gpu_balancer->update([&](auto b) { return b.release(*assigned_node); });
         auto res = GenericErrorResponse{.error = "Invalid client_id"};
         send_http(socket, 500, rfl::json::write(res));
         return;
@@ -270,7 +309,7 @@ void UnixSocketServer::endpoint_StreamSessionAdd(const HTTPRequest &req, std::sh
 
     auto new_session = state::create_stream_session( //
         state_->app_state,
-        choosen_app,
+        assigned_app,
         choosen_client,
         moonlight::DisplayMode{.width = ss.video_width,
                                .height = ss.video_height,
@@ -410,6 +449,32 @@ void UnixSocketServer::endpoint_LobbyCreate(const wolf::api::HTTPRequest &req, s
     auto default_client_settings = state::ClientSettings{};
     auto client_settings = event.value().client_settings.value().value_or(PartialClientSettings{});
     auto lobby_id = state::gen_uuid();
+
+    /* GPU load balancing: pick a GPU for this lobby */
+    auto video_settings = event.value().video_settings;
+    auto balancer_snapshot = state_->app_state->gpu_balancer->load();
+    auto pinned_node = video_settings.runner_render_node.empty()
+                           ? std::nullopt
+                           : std::optional<std::string>(video_settings.runner_render_node);
+    auto assigned_node = balancer_snapshot.pick(pinned_node);
+    if (!assigned_node) {
+      logs::log(logs::error, "[API] No GPU available for lobby");
+      send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "No GPU available"}));
+      return;
+    }
+
+    /* Look up per-GPU pipelines */
+    auto pipelines = state_->app_state->gpu_pipelines->load();
+    auto pipeline_it = pipelines.find(*assigned_node);
+    if (pipeline_it) {
+      video_settings.video_producer_buffer_caps = pipeline_it->video_producer_buffer_caps;
+    }
+    video_settings.wayland_render_node = *assigned_node;
+    video_settings.runner_render_node = *assigned_node;
+
+    /* Atomically acquire the GPU */
+    state_->app_state->gpu_balancer->update([&](auto b) { return b.acquire(*assigned_node); });
+
     auto create_lobby_ev = events::CreateLobbyEvent{
         .id = lobby_id,
         .profile_id = event.value().profile_id.get(),
@@ -418,7 +483,7 @@ void UnixSocketServer::endpoint_LobbyCreate(const wolf::api::HTTPRequest &req, s
         .pin = event.value().pin.get(),
         .multi_user = event.value().multi_user,
         .stop_when_everyone_leaves = event.value().stop_when_everyone_leaves,
-        .video_settings = event.value().video_settings,
+        .video_settings = video_settings,
         .audio_settings = event.value().audio_settings,
         .client_settings =
             state::ClientSettings{
@@ -443,6 +508,8 @@ void UnixSocketServer::endpoint_LobbyCreate(const wolf::api::HTTPRequest &req, s
     auto result = setup_over_future.wait_for(std::chrono::seconds(20));
     if (result == std::future_status::timeout) {
       logs::log(logs::warning, "[API] Lobby setup timed out");
+      /* Release the GPU on timeout */
+      state_->app_state->gpu_balancer->update([&](auto b) { return b.release(*assigned_node); });
       send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "Lobby setup timed out"}));
     } else {
       auto res = LobbyCreateResponse{.lobby_id = lobby_id};
@@ -622,6 +689,23 @@ void UnixSocketServer::endpoint_DockerInspectImage(const HTTPRequest &req, std::
     auto res = GenericErrorResponse{.error = "Image not found"};
     send_http(socket, 404, rfl::json::write(res));
   }
+}
+
+void UnixSocketServer::endpoint_Gpus(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  auto balancer = state_->app_state->gpu_balancer->load();
+  auto res = GpusResponse{};
+  for (const auto &[node, info] : balancer.pool) {
+    int usage = balancer.usage.count(node) ? balancer.usage.at(node) : 0;
+    auto vendor = get_vendor(node);
+    res.gpus.push_back(GpuInfoResponse{
+        .render_node = node,
+        .vendor = get_vendor_name(vendor),
+        .weight = info.weight,
+        .excluded = info.excluded,
+        .usage = usage,
+    });
+  }
+  send_http(socket, 200, rfl::json::write(res));
 }
 
 void UnixSocketServer::endpoint_DockerPullImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {

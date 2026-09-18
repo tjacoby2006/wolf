@@ -175,6 +175,19 @@ struct DockerPullImageResponse {
   bool success = true;
 };
 
+struct GpuInfoResponse {
+  std::string render_node;
+  std::string vendor;
+  int weight;
+  bool excluded;
+  int usage;
+};
+
+struct GpusResponse {
+  bool success = true;
+  std::vector<GpuInfoResponse> gpus;
+};
+
 struct UnixSocket {
   boost::asio::local::stream_protocol::socket socket;
   bool is_alive = true;
@@ -225,6 +238,8 @@ private:
   void endpoint_GetIcon(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_DockerInspectImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_DockerPullImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+
+  void endpoint_Gpus(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void sse_broadcast(const std::string &payload);
   void sse_keepalive(const boost::system::error_code &e);

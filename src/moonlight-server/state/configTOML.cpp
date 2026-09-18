@@ -7,6 +7,7 @@
 #include <range/v3/view.hpp>
 #include <rfl/toml.hpp>
 #include <state/config.hpp>
+#include <state/gpu_balancer.hpp>
 
 namespace state {
 
@@ -208,7 +209,9 @@ parse_apps(const std::vector<BaseApp> &apps,
 
 Config load_or_default(const std::string &source,
                        const std::shared_ptr<events::EventBusType> &ev_bus,
-                       SessionsAtoms running_sessions) {
+                       SessionsAtoms running_sessions,
+                       std::shared_ptr<immer::atom<state::GpuBalancer>> gpu_balancer_atom,
+                       std::shared_ptr<immer::atom<immer::map<std::string, state::PerGpuPipelines>>> gpu_pipelines_atom) {
   if (!file_exist(source)) {
     logs::log(logs::warning, "Unable to open config file: {}, creating one using defaults", source);
     create_default(source);
@@ -244,6 +247,21 @@ Config load_or_default(const std::string &source,
     out_file << new_cfg;
     out_file.close();
     logs::log(logs::debug, "Migrated config from v{} to v7", version);
+  }
+
+  // Migrate v7 → v8: add optional [gpus] section (no data changes needed, just version bump)
+  if (version == 7) {
+    logs::log(logs::debug, "Migrating config from v7 to v8");
+    auto tml = toml::parse_file(source);
+    tml.insert_or_assign("config_version", 8);
+    std::ofstream out_file;
+    out_file.open(source);
+    if (!out_file.is_open()) {
+      throw std::runtime_error("Failed to open config file for writing");
+    }
+    out_file << tml;
+    out_file.close();
+    logs::log(logs::debug, "Migrated config from v7 to v8");
   }
 
   // Will throw if the config is invalid
@@ -397,6 +415,149 @@ Config load_or_default(const std::string &source,
                   }) |
                   ranges::to<ProfilesList>();
   auto profiles_atom = std::make_shared<immer::atom<ProfilesList>>(profiles);
+
+  /* Build GPU balancer and per-GPU pipelines */
+  {
+    auto discovered = discover_render_nodes();
+    auto gpu_cfg = cfg.gpus.value_or(GpuConfig{});
+    auto balancer = state::GpuBalancer::from_pool(discovered,
+                                                  gpu_cfg.weights,
+                                                  gpu_cfg.excluded,
+                                                  default_app_render_node);
+    gpu_balancer_atom->set(balancer);
+
+    /* Build per-GPU encoder pipelines */
+    auto pipelines = immer::map<std::string, PerGpuPipelines>();
+    for (const auto &[node, info] : balancer.pool) {
+      if (info.excluded)
+        continue;
+      auto gpu_vendor = get_vendor(node);
+      if (gpu_vendor == GPU_VENDOR::UNKNOWN) {
+        logs::log(logs::warning, "Skipping GPU {} — unknown vendor, cannot build encoder pipelines", node);
+        continue;
+      }
+
+      auto h264_enc = get_encoder("h264", node, default_gst_video_settings.h264_encoders, gpu_vendor);
+      auto hevc_enc = get_encoder("h265", node, default_gst_video_settings.hevc_encoders, gpu_vendor);
+      auto av1_enc = get_encoder("av1", node, default_gst_video_settings.av1_encoders, gpu_vendor);
+
+      if (!h264_enc) {
+        logs::log(logs::warning,
+                  "Skipping GPU {} — no compatible H.264 encoder found for vendor {}",
+                  node,
+                  get_vendor_name(gpu_vendor));
+        continue;
+      }
+
+      /* Determine zero-copy caps for this GPU */
+      auto gpu_use_zero_copy = use_zero_copy;
+      auto gpu_producer_buffer_caps = std::string("video/x-raw");
+      auto gpu_enc_type = encoder_type(*h264_enc);
+      if (gpu_use_zero_copy) {
+        switch (gpu_enc_type) {
+        case NVIDIA: {
+          gpu_producer_buffer_caps = "video/x-raw(memory:CUDAMemory)";
+          break;
+        }
+        case VAAPI:
+        case QUICKSYNC: {
+          auto required_caps = gstreamer::get_dma_caps("vapostproc");
+          auto gst_caps = required_caps |
+                          ranges::views::remove_if([](const std::string &cap) {
+                            return cap.find("P010") != std::string::npos ||
+                                   cap.find("AR30") != std::string::npos ||
+                                   cap.find(" ") != std::string::npos;
+                          }) |
+                          ranges::to<std::vector>();
+          if (gst_caps.empty()) {
+            gpu_use_zero_copy = false;
+          } else {
+            gpu_producer_buffer_caps =
+                fmt::format("video/x-raw(memory:DMABuf), drm-format={{{}}}", utils::join(gst_caps, ","));
+          }
+          break;
+        }
+        default:
+          gpu_use_zero_copy = false;
+        }
+      }
+
+      auto gpu_h264_params = gpu_use_zero_copy
+                                 ? h264_enc->video_params_zero_copy.value_or(
+                                       utils::get_optional(default_gst_encoder_settings, h264_enc->plugin_name)
+                                           .value_or(empty_enc)
+                                           .video_params_zero_copy)
+                                 : h264_enc->video_params.value_or(
+                                       utils::get_optional(default_gst_encoder_settings, h264_enc->plugin_name)
+                                           .value_or(empty_enc)
+                                           .video_params);
+
+      auto gpu_h264_pipeline = fmt::format("{} !\n{} !\n{} !\n{}",
+                                           default_base_video.source.value(),
+                                           gpu_h264_params,
+                                           h264_enc->encoder_pipeline,
+                                           default_base_video.sink.value());
+
+      std::string gpu_hevc_pipeline;
+      if (hevc_enc) {
+        auto gpu_hevc_params = gpu_use_zero_copy
+                                   ? hevc_enc->video_params_zero_copy.value_or(
+                                         utils::get_optional(default_gst_encoder_settings, hevc_enc->plugin_name)
+                                             .value_or(empty_enc)
+                                             .video_params_zero_copy)
+                                   : hevc_enc->video_params.value_or(
+                                         utils::get_optional(default_gst_encoder_settings, hevc_enc->plugin_name)
+                                             .value_or(empty_enc)
+                                             .video_params);
+        gpu_hevc_pipeline = fmt::format("{} !\n{} !\n{} !\n{}",
+                                        default_base_video.source.value(),
+                                        gpu_hevc_params,
+                                        hevc_enc->encoder_pipeline,
+                                        default_base_video.sink.value());
+      }
+
+      std::string gpu_av1_pipeline;
+      if (av1_enc) {
+        auto gpu_av1_params = gpu_use_zero_copy
+                                  ? av1_enc->video_params_zero_copy.value_or(
+                                        utils::get_optional(default_gst_encoder_settings, av1_enc->plugin_name)
+                                            .value_or(empty_enc)
+                                            .video_params_zero_copy)
+                                  : av1_enc->video_params.value_or(
+                                        utils::get_optional(default_gst_encoder_settings, av1_enc->plugin_name)
+                                            .value_or(empty_enc)
+                                            .video_params);
+        gpu_av1_pipeline = fmt::format("{} !\n{} !\n{} !\n{}",
+                                       default_base_video.source.value(),
+                                       gpu_av1_params,
+                                       av1_enc->encoder_pipeline,
+                                       default_base_video.sink.value());
+      }
+
+      auto opus_pipeline = fmt::format("{} !\n{} !\n{} !\n{}",
+                                       default_base_audio.source.value(),
+                                       default_base_audio.audio_params.value(),
+                                       default_base_audio.opus_encoder.value(),
+                                       default_base_audio.sink.value());
+
+      pipelines = pipelines.set(
+          node,
+          PerGpuPipelines{
+              .h264_gst_pipeline = gpu_h264_pipeline,
+              .hevc_gst_pipeline = gpu_hevc_pipeline,
+              .av1_gst_pipeline = gpu_av1_pipeline,
+              .opus_gst_pipeline = opus_pipeline,
+              .video_producer_buffer_caps = gpu_producer_buffer_caps,
+          });
+
+      logs::log(logs::info,
+                "Built encoder pipelines for GPU {} ({}, weight={})",
+                node,
+                get_vendor_name(gpu_vendor),
+                info.weight);
+    }
+    gpu_pipelines_atom->set(pipelines);
+  }
 
   return Config{.uuid = cfg.uuid,
                 .hostname = cfg.hostname,

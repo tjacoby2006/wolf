@@ -115,6 +115,11 @@ struct Lobby {
   std::shared_ptr<Runner> runner;
 
   /**
+   * The render node assigned to this lobby (for GPU release on stop)
+   */
+  std::string render_node;
+
+  /**
    * A list of all currently connected sessions by their session_id
    */
   std::shared_ptr<immer::atom<immer::vector<immer::box<std::string /* session_id */>>>> connected_sessions =

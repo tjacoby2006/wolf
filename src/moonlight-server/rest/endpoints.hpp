@@ -428,8 +428,46 @@ void launch(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
     return;
   }
 
+  /* GPU load balancing: pick a GPU for this app */
+  auto balancer_snapshot = state->gpu_balancer->load();
+  auto pinned_node = app->render_node.empty() ? std::nullopt : std::optional<std::string>(app->render_node);
+  auto assigned_node = balancer_snapshot.pick(pinned_node);
+  if (!assigned_node) {
+    logs::log(logs::error, "[HTTP] No GPU available for app {}", app->base.title);
+    server_error<SimpleWeb::HTTPS>(response);
+    return;
+  }
+
+  /* Look up per-GPU pipelines */
+  auto pipelines = state->gpu_pipelines->load();
+  auto pipeline_it = pipelines.find(*assigned_node);
+  if (pipeline_it == nullptr) {
+    logs::log(logs::error,
+              "[HTTP] No encoder pipelines built for GPU {}, falling back to app defaults",
+              *assigned_node);
+    // Fall through with the original app — the default pipelines will be used
+  }
+
+  /* Build a modified app with the assigned GPU and its pipelines */
+  auto assigned_app = events::App{
+      .base = app->base,
+      .video_producer_buffer_caps = pipeline_it ? pipeline_it->video_producer_buffer_caps
+                                                : app->video_producer_buffer_caps,
+      .h264_gst_pipeline = pipeline_it ? pipeline_it->h264_gst_pipeline : app->h264_gst_pipeline,
+      .hevc_gst_pipeline = pipeline_it ? pipeline_it->hevc_gst_pipeline : app->hevc_gst_pipeline,
+      .av1_gst_pipeline = pipeline_it ? pipeline_it->av1_gst_pipeline : app->av1_gst_pipeline,
+      .render_node = *assigned_node,
+      .opus_gst_pipeline = pipeline_it ? pipeline_it->opus_gst_pipeline : app->opus_gst_pipeline,
+      .start_virtual_compositor = app->start_virtual_compositor,
+      .start_audio_server = app->start_audio_server,
+      .runner = app->runner,
+  };
+
+  /* Atomically acquire the GPU */
+  state->gpu_balancer->update([&](auto b) { return b.acquire(*assigned_node); });
+
   auto client_ip = get_client_ip<SimpleWeb::HTTPS>(request);
-  auto new_session = create_run_session(request->parse_query_string(), client_ip, current_client, state, app.value());
+  auto new_session = create_run_session(request->parse_query_string(), client_ip, current_client, state, assigned_app);
   state->event_bus->fire_event(immer::box<events::StreamSession>(*new_session));
   state->running_sessions->update(
       [new_session](const immer::vector<events::StreamSession> &ses_v) { return ses_v.push_back(*new_session); });

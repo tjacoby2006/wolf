@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gpu_balancer.hpp"
 #include "gst-video-context.hpp"
 
 #include <boost/asio.hpp>
@@ -154,6 +155,18 @@ struct PairCache {
 using SessionsAtoms = std::shared_ptr<immer::atom<immer::vector<events::StreamSession>>>;
 
 /**
+ * Per-GPU encoder pipelines, built at config load time.
+ * Keyed by render node path (e.g. /dev/dri/renderD128).
+ */
+struct PerGpuPipelines {
+  std::string h264_gst_pipeline;
+  std::string hevc_gst_pipeline;
+  std::string av1_gst_pipeline;
+  std::string opus_gst_pipeline;
+  std::string video_producer_buffer_caps;
+};
+
+/**
  * The whole application state as a composition of immutable datastructures
  */
 struct AppState {
@@ -195,6 +208,21 @@ struct AppState {
    * A list of all currently running (and paused) streaming sessions
    */
   SessionsAtoms running_sessions;
+
+  /**
+   * GPU load balancer — tracks which GPUs are available, their weights,
+   * exclusions, and how many containers are currently using each one.
+   */
+  std::shared_ptr<immer::atom<GpuBalancer>> gpu_balancer =
+      std::make_shared<immer::atom<state::GpuBalancer>>();
+
+  /**
+   * Per-GPU encoder pipelines, keyed by render node path.
+   * Built at config load time so each session can pick the right pipeline
+   * for its assigned GPU.
+   */
+  std::shared_ptr<immer::atom<immer::map<std::string, PerGpuPipelines>>> gpu_pipelines =
+      std::make_shared<immer::atom<immer::map<std::string, PerGpuPipelines>>>();
 };
 
 const static immer::array<audio::AudioMode> AUDIO_CONFIGURATIONS = {
