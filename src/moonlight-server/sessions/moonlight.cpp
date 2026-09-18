@@ -105,7 +105,16 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
               immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session->session_id}));
           return;
         }
-        session->assigned_render_node = *chosen;
+        app_state->running_sessions->update([node = *chosen, id = session->session_id](const immer::vector<events::StreamSession> &ses_v) {
+          return ses_v.map([node, id](auto s) {
+            if (s.session_id == id) {
+              auto updated = s;
+              updated.assigned_render_node = node;
+              return updated;
+            }
+            return s;
+          });
+        });
         gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.acquire(node); });
 
         /* Initialise plugged device queue */
