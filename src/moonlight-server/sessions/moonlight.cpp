@@ -111,7 +111,7 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
             if (v[i].session_id == id) {
               auto updated = v[i];
               updated.assigned_render_node = node;
-              v[i] = updated;
+              v.set(i, updated);
             }
           }
           return v.persistent();
