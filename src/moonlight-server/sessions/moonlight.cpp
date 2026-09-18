@@ -106,14 +106,15 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           return;
         }
         app_state->running_sessions->update([node = *chosen, id = session->session_id](const immer::vector<events::StreamSession> &ses_v) {
-          return ses_v.map([node, id](auto s) {
-            if (s.session_id == id) {
-              auto updated = s;
+          auto v = ses_v.transient();
+          for (size_t i = 0; i < v.size(); ++i) {
+            if (v[i].session_id == id) {
+              auto updated = v[i];
               updated.assigned_render_node = node;
-              return updated;
+              v[i] = updated;
             }
-            return s;
-          });
+          }
+          return v.persistent();
         });
         gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.acquire(node); });
 
