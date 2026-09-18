@@ -21,6 +21,15 @@ std::vector<std::string> linked_devices(std::string_view gpu);
 std::string get_render_node_name(std::string_view render_node);
 
 /**
+ * Check whether a render node is present and openable as a DRM device right now.
+ *
+ * The GPU pool is discovered once at startup, but nodes can disappear afterwards
+ * (GPU reset, driver reload, container teardown). Handing a stale or unusable node to the
+ * virtual compositor makes it panic and abort Wolf, so callers should probe before use.
+ */
+bool is_render_node_available(std::string_view render_node);
+
+/**
  * Given a render node (ex: /dev/dri/renderD136) returns the corresponding NVIDIA device index
  * (ex: "1") for use with NVIDIA_VISIBLE_DEVICES / DeviceRequests.DeviceIDs.
  * Returns std::nullopt if the GPU is not NVIDIA or the index cannot be determined.

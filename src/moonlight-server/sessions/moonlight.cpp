@@ -99,6 +99,13 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
       [&app_state, plugged_devices_queue, gpu_balancer, runtime_dir, audio_server](const immer::box<events::StreamSession> &session) {
         /* Assign a GPU to this session (pinned if the app requests one, otherwise load-balanced) */
         auto chosen = gpu_balancer->load()->pick(session->app->gpu_pin);
+        // The pool is discovered at startup and can go stale (GPU reset, driver reload, ...).
+        // Handing a dead node to the virtual compositor makes it panic and abort Wolf, so probe first.
+        if (chosen.has_value() && !is_render_node_available(*chosen)) {
+          logs::log(logs::error, "[STREAM_SESSION] Assigned GPU {} is not available for session {}", *chosen, session->session_id);
+          gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.release(node); });
+          chosen.reset();
+        }
         if (!chosen.has_value()) {
           logs::log(logs::error, "[STREAM_SESSION] No available GPU for session {}", session->session_id);
           auto ev_bus = session->event_bus;

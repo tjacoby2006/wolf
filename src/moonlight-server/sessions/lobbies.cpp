@@ -81,6 +81,13 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         /* Assign a GPU to this lobby once at creation (pinned if the creating session's app requests one,
          * otherwise load-balanced). All joining clients share this GPU; it is released when the lobby stops. */
         auto chosen = gpu_balancer->load()->pick(std::nullopt);
+        // The pool is discovered at startup and can go stale (GPU reset, driver reload, ...).
+        // Handing a dead node to the virtual compositor makes it panic and abort Wolf, so probe first.
+        if (chosen.has_value() && !is_render_node_available(*chosen)) {
+          logs::log(logs::error, "[LOBBY] Assigned GPU {} is not available for lobby {}", *chosen, lobby_settings->id);
+          gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.release(node); });
+          chosen.reset();
+        }
         if (!chosen.has_value()) {
           logs::log(logs::error, "[LOBBY] No available GPU for lobby {}", lobby_settings->id);
           // Defer to a detached thread to avoid a nested fire_event under the same shared_lock,

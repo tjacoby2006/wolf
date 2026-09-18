@@ -215,6 +215,32 @@ std::string get_render_node_name(std::string_view render_node) {
   return std::string(base);
 }
 
+bool is_render_node_available(std::string_view render_node) {
+  if (render_node.empty()) {
+    logs::log(logs::error, "Render node is empty");
+    return false;
+  }
+  std::error_code ec;
+  if (!std::filesystem::exists(render_node, ec) || ec) {
+    logs::log(logs::error, "Render node {} does not exist (or cannot be accessed)", render_node);
+    return false;
+  }
+  auto fd = open(render_node.data(), O_RDWR | O_CLOEXEC);
+  if (fd < 0) {
+    logs::log(logs::error, "Unable to open render node {}: {}", render_node, strerror(errno));
+    return false;
+  }
+  drmDevice *dev = nullptr;
+  auto ret = drmGetDevice2(fd, 0, &dev);
+  close(fd);
+  if (ret < 0) {
+    logs::log(logs::error, "Render node {} is not a usable DRM device: {}", render_node, strerror(-ret));
+    return false;
+  }
+  drmFreeDevice(&dev);
+  return true;
+}
+
 std::optional<std::string> get_nvidia_device_index(std::string_view render_node) {
   if (get_vendor(render_node) != NVIDIA) {
     return std::nullopt;
