@@ -505,7 +505,52 @@ There are two main separated parts that make use of HW acceleration in Wolf:
 * *Gstreamer video encoding*: this will use HW acceleration in order to efficiently encode the video stream with H.264 or HEVC.
 
 Since Wolf supports HW accelerated zero-copy pipelines it's best to keep both the Wayland rendering and the Gstreamer encoding on the same GPU.
-Support for multi-GPU load balancing is planned for future releases.
+
+=== Multi-GPU load balancing
+
+Wolf can automatically spread apps across multiple GPUs instead of pinning everything to a single one.
+Every render node found under `/dev/dri` (`renderD*`) is added to a pool, along with the `WOLF_RENDER_NODE` default, so single-GPU setups keep working unchanged.
+
+When a new app (or lobby) starts, Wolf picks a GPU from the pool and remembers how many containers are currently using each one.
+This means a GPU that has just been freed by a quitting app is reused before any other GPU is considered — it is not a blind round-robin.
+
+You can tune this behaviour in the `config.toml` file:
+
+* `[gpus]` — an optional table mapping a render node path to an integer *weight* (a relative performance metric you supply).
+A higher weight means more apps are balanced onto that GPU before Wolf spills over to the others.
+For example, with an RTX 3090 and a 1660 you can send two or more apps to the 3090 first:
+
+[source,toml]
+----
+[gpus]
+"/dev/dri/renderD128" = 4 # e.g. RTX 3090
+"/dev/dri/renderD136" = 1 # e.g. GTX 1660
+----
+
+* `excluded_gpus` — an optional list of render node paths to remove from the pool entirely (for example an iGPU that drives your physical display).
+
+[source,toml]
+----
+excluded_gpus = ["/dev/dri/renderD136"]
+----
+
+* Per-app pinning — any app can be pinned to a specific GPU with the `gpu_pin` field (a render node path).
+A pinned app always uses that GPU and is not load-balanced. If the pinned GPU is excluded or missing, the app will not start.
+
+[source,toml]
+----
+[[profiles.apps]]
+title = "Steam"
+gpu_pin = "/dev/dri/renderD128"
+# ...
+----
+
+Lobbies assign a single GPU once at creation (driven by the creating session) and all joining clients share it; the GPU is released when the lobby stops.
+
+[TIP]
+====
+On NVIDIA hosts without a custom driver volume, Wolf scopes each container to only its assigned GPU (via `NVIDIA_VISIBLE_DEVICES` / `DeviceIDs`) so that multiple containers can run on different GPUs at the same time.
+====
 
 [#_keyboard_layout]
 == Changing and Switching Keyboard Layouts in wolf Apps Containers

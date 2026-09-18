@@ -7,6 +7,7 @@
 #include <range/v3/view.hpp>
 #include <rfl/toml.hpp>
 #include <state/config.hpp>
+#include <state/gpu_balancer.hpp>
 
 namespace state {
 
@@ -195,6 +196,7 @@ parse_apps(const std::vector<BaseApp> &apps,
                         .hevc_gst_pipeline = hevc_gst_pipeline,
                         .av1_gst_pipeline = av1_gst_pipeline,
                         .render_node = app_render_node,
+                        .gpu_pin = app.gpu_pin,
 
                         .opus_gst_pipeline = opus_gst_pipeline,
                         .start_virtual_compositor = app.start_virtual_compositor.value_or(true),
@@ -377,6 +379,9 @@ Config load_or_default(const std::string &source,
 
   auto clients_atom = std::make_shared<immer::atom<PairedClientList>>(paired_clients);
 
+  /* Build the GPU pool for load balancing: discovered render nodes + user [gpus] weights/exclusions */
+  auto gpu_pool = GpuBalancer::from_pool(discover_render_nodes(), cfg.gpus, cfg.excluded_gpus, default_app_render_node);
+
   /* Get profiles, for each app defined will merge with default settings */
   auto profiles = cfg.profiles | //
                   ranges::views::transform([&](const Profile &profile) {
@@ -404,7 +409,8 @@ Config load_or_default(const std::string &source,
                 .support_hevc = hevc_encoder.has_value(),
                 .support_av1 = av1_encoder.has_value() && encoder_type(*av1_encoder) != SOFTWARE,
                 .paired_clients = clients_atom,
-                .profiles = profiles_atom};
+                .profiles = profiles_atom,
+                .gpu_pool = gpu_pool};
 }
 
 void pair(const Config &cfg, const PairedClient &client) {

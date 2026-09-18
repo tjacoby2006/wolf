@@ -70,11 +70,22 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                        const std::optional<AudioServer> &audio_server) {
   immer::vector_transient<immer::box<events::EventBusHandlers>> handlers;
 
+  auto gpu_balancer = app_state->gpu_balancer;
+
   // On create lobby event
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::CreateLobbyEvent>>(
-      [=](const immer::box<events::CreateLobbyEvent> &lobby_settings) {
+      [=, gpu_balancer](const immer::box<events::CreateLobbyEvent> &lobby_settings) {
         logs::log(logs::info, "[LOBBY] Creating new lobby");
         auto ev_bus = app_state->event_bus;
+
+        /* Assign a GPU to this lobby once at creation (pinned if the creating session's app requests one,
+         * otherwise load-balanced). All joining clients share this GPU; it is released when the lobby stops. */
+        auto chosen = gpu_balancer->load()->pick(std::nullopt);
+        if (!chosen.has_value()) {
+          logs::log(logs::error, "[LOBBY] No available GPU for lobby {}", lobby_settings->id);
+          ev_bus->fire_event(immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby_settings->id}});
+          return;
+        }
 
         auto lobby = std::make_shared<events::Lobby>(
             events::Lobby{.id = lobby_settings->id,
@@ -84,7 +95,9 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                           .multi_user = lobby_settings->multi_user,
                           .pin = lobby_settings->pin,
                           .stop_when_everyone_leaves = lobby_settings->stop_when_everyone_leaves,
-                          .runner = lobby_settings->runner});
+                          .runner = lobby_settings->runner,
+                          .assigned_render_node = *chosen});
+        gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.acquire(node); });
         app_state->lobbies->update(
             [lobby](const immer::vector<events::Lobby> &lobbies) { return lobbies.push_back(*lobby); });
 
@@ -97,7 +110,9 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           std::thread([lobby, lobby_settings, ev_bus, on_ready, gst_context = app_state->gst_context]() {
             streaming::start_video_producer(lobby->id,
                                             lobby_settings->video_settings.video_producer_buffer_caps,
-                                            lobby_settings->video_settings.wayland_render_node,
+                                            lobby->assigned_render_node.empty()
+                                                ? lobby_settings->video_settings.wayland_render_node
+                                                : lobby->assigned_render_node,
                                             {.width = lobby_settings->video_settings.width,
                                              .height = lobby_settings->video_settings.height,
                                              .refreshRate = lobby_settings->video_settings.refresh_rate},
@@ -131,11 +146,21 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                   std::filesystem::create_directories(full_path);
 
                   std::thread([=]() {
+                    auto assigned_node = lobby->assigned_render_node.empty()
+                                             ? lobby_settings->video_settings.wayland_render_node
+                                             : lobby->assigned_render_node;
                     start_runner(lobby->runner,
                                  lobby->plugged_devices_queue,
                                  immer::box<RunnerArgs>{RunnerArgs{
                                      .session_id = lobby->id,
-                                     .video_settings = lobby_settings->video_settings,
+                                     .video_settings =
+                                         events::VideoSettings{.width = lobby_settings->video_settings.width,
+                                                               .height = lobby_settings->video_settings.height,
+                                                               .refresh_rate = lobby_settings->video_settings.refresh_rate,
+                                                               .wayland_render_node = assigned_node,
+                                                               .runner_render_node = assigned_node,
+                                                               .video_producer_buffer_caps =
+                                                                   lobby_settings->video_settings.video_producer_buffer_caps},
                                      .wayland_display = lobby->wayland_display->load(),
                                      .audio_server = audio_server,
                                      .audio_sink = lobby->audio_sink->load(),
@@ -273,6 +298,12 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           return;
         }
         logs::log(logs::info, "[LOBBY] stopping lobby {}", stop_lobby_event->lobby_id);
+
+        // Release the GPU assigned to this lobby so it can be reused by the next app/lobby
+        if (!lobby->assigned_render_node.empty()) {
+          gpu_balancer->update(
+              [node = lobby->assigned_render_node](const state::GpuBalancer &bal) { return bal.release(node); });
+        }
 
         immer::vector<immer::box<std::string>> sessions = lobby->connected_sessions->load();
         for (auto &session_id : sessions) {

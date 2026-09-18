@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,6 +19,13 @@ std::vector<std::string> linked_devices(std::string_view gpu);
  * works with symlinks too, /dev/dri/by-path/pci-0000:2d:00.0-render returns renderD128
  */
 std::string get_render_node_name(std::string_view render_node);
+
+/**
+ * Given a render node (ex: /dev/dri/renderD136) returns the corresponding NVIDIA device index
+ * (ex: "1") for use with NVIDIA_VISIBLE_DEVICES / DeviceRequests.DeviceIDs.
+ * Returns std::nullopt if the GPU is not NVIDIA or the index cannot be determined.
+ */
+std::optional<std::string> get_nvidia_device_index(std::string_view render_node);
 
 enum GPU_VENDOR {
   NVIDIA,

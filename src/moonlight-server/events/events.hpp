@@ -70,6 +70,7 @@ struct App {
   std::string av1_gst_pipeline;
 
   std::string render_node;
+  std::optional<std::string> gpu_pin;
 
   std::string opus_gst_pipeline;
   bool start_virtual_compositor;
@@ -113,6 +114,12 @@ struct Lobby {
    * The app that is currently running in the lobby
    */
   std::shared_ptr<Runner> runner;
+
+  /**
+   * The render node (GPU) assigned to this lobby by the load balancer. Assigned once at creation,
+   * shared by all connected sessions, released when the lobby stops.
+   */
+  std::string assigned_render_node;
 
   /**
    * A list of all currently connected sessions by their session_id
@@ -411,6 +418,12 @@ struct StreamSession {
   std::shared_ptr<EventBusType> event_bus;
   immer::box<wolf::config::ClientSettings> client_settings;
   std::shared_ptr<App> app;
+
+  /**
+   * The render node (GPU) assigned to this session by the load balancer. Empty until assigned.
+   */
+  std::string assigned_render_node;
+
   std::string app_local_state_folder;
   std::string app_host_state_folder;
 

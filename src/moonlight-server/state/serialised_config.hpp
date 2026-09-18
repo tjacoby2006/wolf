@@ -120,6 +120,7 @@ struct BaseApp {
   std::string title;
   std::optional<std::string> icon_png_path;
   std::optional<std::string> render_node;
+  std::optional<std::string> gpu_pin;
   std::optional<BaseAppVideoOverride> video;
   std::optional<BaseAppAudioOverride> audio;
   std::optional<bool> start_virtual_compositor;
@@ -140,10 +141,13 @@ struct Profile {
 struct WolfConfig {
   std::string hostname;
   std::string uuid;
-  int config_version = 7;
+  int config_version = 8;
   std::vector<PairedClient> paired_clients;
   std::vector<Profile> profiles;
   GstreamerSettings gstreamer;
+  std::map<std::string, int> gpus = {};
+  /** Render nodes to exclude from the load-balancing pool (e.g. an iGPU used for the display). */
+  std::vector<std::string> excluded_gpus = {};
 };
 
 struct BaseConfig {

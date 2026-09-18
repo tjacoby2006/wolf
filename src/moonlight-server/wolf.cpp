@@ -116,7 +116,8 @@ auto initialize(std::string_view config_file, std::string_view pkey_filename, st
       .pairing_atom = std::make_shared<immer::atom<immer::map<std::string, immer::box<events::PairSignal>>>>(),
       .event_bus = event_bus,
       .lobbies = std::make_shared<immer::atom<immer::vector<events::Lobby>>>(),
-      .running_sessions = running_sessions};
+      .running_sessions = running_sessions,
+      .gpu_balancer = std::make_shared<immer::atom<state::GpuBalancer>>(config->gpu_pool)};
   return immer::box<state::AppState>(state);
 }
 

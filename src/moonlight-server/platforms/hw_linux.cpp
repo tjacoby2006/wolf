@@ -215,6 +215,32 @@ std::string get_render_node_name(std::string_view render_node) {
   return std::string(base);
 }
 
+std::optional<std::string> get_nvidia_device_index(std::string_view render_node) {
+  if (get_vendor(render_node) != NVIDIA) {
+    return std::nullopt;
+  }
+
+  auto device = drm_open_device(render_node);
+  if (!(device->available_nodes & (1 << DRM_NODE_PRIMARY))) {
+    logs::log(logs::warning, "{} doesn't have a primary node, cannot determine NVIDIA device index", render_node);
+    return std::nullopt;
+  }
+
+  auto nvidia_node = get_nvidia_node(device->nodes[DRM_NODE_PRIMARY]);
+  if (!nvidia_node) {
+    logs::log(logs::warning, "Unable to determine NVIDIA device node for {}", render_node);
+    return std::nullopt;
+  }
+
+  // nvidia_node is of the form /dev/nvidia<index>
+  auto index = nvidia_node->substr(std::string("/dev/nvidia").size());
+  if (index.empty() || index.find_first_not_of("0123456789") != std::string::npos) {
+    logs::log(logs::warning, "Unexpected NVIDIA device node {}", *nvidia_node);
+    return std::nullopt;
+  }
+  return index;
+}
+
 std::string get_ip_address(ifaddrs *ifa) {
   if (ifa->ifa_addr->sa_family == AF_INET) { // IP4
     auto tmpAddrPtr = &((struct sockaddr_in *)ifa->ifa_addr)->sin_addr;

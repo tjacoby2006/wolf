@@ -83,16 +83,21 @@ void RunDocker::run(std::string_view session_id,
               fake_udev_cli_path);
   }
 
-  // Add equivalent of --gpu=all if on NVIDIA without the custom driver volume
+  // Add equivalent of --gpus (scoped to the assigned GPU) if on NVIDIA without the custom driver volume
   auto final_json_opts = this->base_create_json;
   if (get_vendor(render_node) == NVIDIA && !utils::get_env("NVIDIA_DRIVER_VOLUME_NAME")) {
     logs::log(logs::info, "NVIDIA_DRIVER_VOLUME_NAME not set, assuming nvidia driver toolkit is installed..");
+    // Scope the container to only the assigned GPU so that multiple containers can share the host
+    auto nvidia_device = get_nvidia_device_index(render_node);
+    if (!nvidia_device) {
+      logs::log(logs::warning, "[DOCKER] Could not determine NVIDIA device index for {}, falling back to all GPUs", render_node);
+    }
     {
       auto parsed_json = utils::parse_json(final_json_opts).as_object();
       auto default_gpu_config = boost::json::array{                    // [
-                                                   boost::json::object{// {
-                                                                       {"DeviceIDs", {"all"}},
-                                                                       {"Capabilities", boost::json::array{{"gpu"}}}}};
+                                                    boost::json::object{// {
+                                                                        {"DeviceIDs", nvidia_device ? *nvidia_device : "all"},
+                                                                        {"Capabilities", boost::json::array{{"gpu"}}}}};
       if (auto host_config_ptr = parsed_json.if_contains("HostConfig")) {
         auto host_config = host_config_ptr->as_object();
         if (host_config.find("DeviceRequests") == host_config.end()) {
@@ -110,13 +115,13 @@ void RunDocker::run(std::string_view session_id,
       }
     }
 
-    // Setup -e NVIDIA_VISIBLE_DEVICES=all  -e NVIDIA_DRIVER_CAPABILITIES=all if not present
+    // Setup -e NVIDIA_VISIBLE_DEVICES=<assigned>  -e NVIDIA_DRIVER_CAPABILITIES=all if not present
     {
       auto nvd_env = std::find_if(full_env.begin(), full_env.end(), [](const std::string &env) {
         return env.find("NVIDIA_VISIBLE_DEVICES") != std::string::npos;
       });
       if (nvd_env == full_env.end()) {
-        full_env.push_back("NVIDIA_VISIBLE_DEVICES=all");
+        full_env.push_back(fmt::format("NVIDIA_VISIBLE_DEVICES={}", nvidia_device ? *nvidia_device : "all"));
       }
 
       auto nvd_caps_env = std::find_if(full_env.begin(), full_env.end(), [](const std::string &env) {

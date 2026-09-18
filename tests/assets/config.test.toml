@@ -8,6 +8,15 @@ support_av1 = false
 # The version of this config file
 config_version = 7
 
+# Optional per-GPU relative performance weights (render node path -> integer weight).
+# Higher weight = more apps are balanced onto that GPU before spilling over to others.
+[gpus]
+"/dev/dri/renderD128" = 4
+"/dev/dri/renderD136" = 1
+
+# GPUs to exclude from the load-balancing pool (e.g. an iGPU driving the physical display)
+excluded_gpus = []
+
 
 # A list of paired clients that will be allowed to stream
 [[paired_clients]]

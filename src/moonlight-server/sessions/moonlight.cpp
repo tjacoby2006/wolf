@@ -56,9 +56,18 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
    * This way we can accumulate devices here until the docker container is up and running
    */
   auto plugged_devices_queue = std::make_shared<immer::atom<session_devices>>();
+  auto gpu_balancer = app_state->gpu_balancer;
 
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StopStreamEvent>>(
-      [&app_state, plugged_devices_queue](const immer::box<events::StopStreamEvent> &ev) {
+      [&app_state, plugged_devices_queue, gpu_balancer](const immer::box<events::StopStreamEvent> &ev) {
+        // Release the GPU assigned to this session so it can be reused by the next app
+        if (auto session = state::get_session_by_id(app_state->running_sessions->load().get(), ev->session_id)) {
+          auto node = session->assigned_render_node;
+          if (!node.empty()) {
+            gpu_balancer->update([node](const state::GpuBalancer &bal) { return bal.release(node); });
+          }
+        }
+
         // Remove session from app state so that HTTP/S applist gets updated
         // This should effectively destroy the virtual Wayland session since it holds the last reference
         app_state->running_sessions->update([&ev](const immer::vector<events::StreamSession> &ses_v) {
@@ -87,7 +96,18 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
 
   // Run process and our custom wayland as soon as a new StreamSession is created
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StreamSession>>(
-      [=](const immer::box<events::StreamSession> &session) {
+      [&, gpu_balancer](const immer::box<events::StreamSession> &session) {
+        /* Assign a GPU to this session (pinned if the app requests one, otherwise load-balanced) */
+        auto chosen = gpu_balancer->load()->pick(session->app->gpu_pin);
+        if (!chosen.has_value()) {
+          logs::log(logs::error, "[STREAM_SESSION] No available GPU for session {}", session->session_id);
+          session->event_bus->fire_event(
+              immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session->session_id}));
+          return;
+        }
+        session->assigned_render_node = *chosen;
+        gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.acquire(node); });
+
         /* Initialise plugged device queue */
         auto devices_q = std::make_shared<events::devices_atom_queue>();
         plugged_devices_queue->update(
@@ -103,7 +123,8 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           std::thread([session, on_ready, gst_context = app_state->gst_context]() {
             streaming::start_video_producer(std::to_string(session->session_id),
                                             session->app->video_producer_buffer_caps,
-                                            session->app->render_node,
+                                            session->assigned_render_node.empty() ? session->app->render_node
+                                                                                   : session->assigned_render_node,
                                             {.width = session->display_mode.width,
                                              .height = session->display_mode.height,
                                              .refreshRate = session->display_mode.refreshRate},
@@ -211,8 +232,12 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                           .width = run_session->stream_session->display_mode.width,
                           .height = run_session->stream_session->display_mode.height,
                           .refresh_rate = run_session->stream_session->display_mode.refreshRate,
-                          .wayland_render_node = run_session->stream_session->app->render_node,
-                          .runner_render_node = run_session->stream_session->app->render_node,
+                          .wayland_render_node = run_session->stream_session->assigned_render_node.empty()
+                                                      ? run_session->stream_session->app->render_node
+                                                      : run_session->stream_session->assigned_render_node,
+                          .runner_render_node = run_session->stream_session->assigned_render_node.empty()
+                                                     ? run_session->stream_session->app->render_node
+                                                     : run_session->stream_session->assigned_render_node,
                           .video_producer_buffer_caps = run_session->stream_session->app->video_producer_buffer_caps,
                       },
                   .wayland_display = run_session->stream_session->wayland_display->load(),

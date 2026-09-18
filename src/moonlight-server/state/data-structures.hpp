@@ -20,6 +20,7 @@
 #include <moonlight/data-structures.hpp>
 #include <openssl/x509.h>
 #include <optional>
+#include <state/gpu_balancer.hpp>
 #include <state/serialised_config.hpp>
 #include <utility>
 #include <vector>
@@ -93,6 +94,11 @@ struct Config {
    * Profiles will be shown in WolfUI
    */
   std::shared_ptr<immer::atom<ProfilesList>> profiles;
+
+  /**
+   * The static GPU pool (render nodes + weights/exclusions) used to initialise the load balancer.
+   */
+  GpuBalancer gpu_pool = {};
 };
 
 /**
@@ -195,6 +201,12 @@ struct AppState {
    * A list of all currently running (and paused) streaming sessions
    */
   SessionsAtoms running_sessions;
+
+  /**
+   * GPU load balancer: tracks the pool of render nodes and how many containers use each one.
+   * Apps acquire a node when they start and release it when they stop.
+   */
+  std::shared_ptr<immer::atom<GpuBalancer>> gpu_balancer = std::make_shared<immer::atom<GpuBalancer>>(GpuBalancer{});
 };
 
 const static immer::array<audio::AudioMode> AUDIO_CONFIGURATIONS = {
