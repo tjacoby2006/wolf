@@ -1,6 +1,6 @@
 #pragma once
 
-#include "gpu_balancer.hpp"
+#include <state/gpu_balancer.hpp>
 #include "gst-video-context.hpp"
 
 #include <boost/asio.hpp>
