@@ -23,7 +23,8 @@ set(SRC_LIST
         testMoonlight.cpp
         testRTSP.cpp
         testWolfAPI.cpp
-        testBatchedSend.cpp)
+        testBatchedSend.cpp
+        testSession.cpp)
 
 option(TEST_RUST_WAYLAND "Test our custom Rust wayland compositor" ON)
 if (UNIX AND NOT APPLE)
@@ -104,6 +105,7 @@ target_compile_features(wolftests PRIVATE cxx_std_17)
 # Should be linked to the main library, as well as the Catch2 testing library
 target_link_libraries_system(wolftests PRIVATE
         wolf::runner
+        wolf::session
         Catch2::Catch2)
 
 ## Test assets
