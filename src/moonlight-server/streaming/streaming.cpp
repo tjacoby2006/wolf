@@ -11,6 +11,7 @@
 #include <immer/box.hpp>
 #include <memory>
 #include <platform/video/encoder_policy.hpp>
+#include <streaming/pacing.hpp>
 #include <streaming/streaming.hpp>
 #include <thread>
 
@@ -213,23 +214,11 @@ void start_audio_producer(const std::string &session_id,
 
 namespace custom_sink {
 
-struct PacingConfig {
-  bool enabled = false;
-  std::size_t max_packets_per_ms = 0;
-  /**
-   * Maximum number of packets per sendmmsg() syscall.
-   * Caps batch size to stay under 64KB per call, following Sunshine's pattern.
-   * Computed at runtime as min(16, 65536 / packet_size).
-   * Does not affect pacing rate — only syscall granularity.
-   */
-  std::size_t max_batch_size = 16;
-  std::chrono::steady_clock::time_point next_frame_start = std::chrono::steady_clock::now();
-};
-
 struct UDPSink {
   std::shared_ptr<udp::socket> socket;
   std::shared_ptr<udp::endpoint> client_endpoint;
-  PacingConfig pacing;
+  pacing::Config pacing;
+  pacing::State pacing_state;
   wolf::platform::batched_send_info_t send_info;
 };
 
@@ -281,40 +270,27 @@ static GstFlowReturn send_buffer_batched(GstBufferList *buffer_list, UDPSink *ud
     udp_sink->send_info.block_count = num_buffers;
     success = wolf::platform::send_batch(udp_sink->send_info);
   } else {
-    auto &pacing = udp_sink->pacing;
-    auto frame_start = std::max(pacing.next_frame_start, std::chrono::steady_clock::now());
-    std::size_t packets_sent = 0;
-    std::size_t packets_in_window = 0;
-
-    while (packets_sent < num_buffers) {
-      std::size_t remaining = num_buffers - packets_sent;
-      std::size_t budget = pacing.max_packets_per_ms - packets_in_window;
-
-      if (budget == 0) {
-        auto due = frame_start + std::chrono::nanoseconds(1000000) * packets_sent / pacing.max_packets_per_ms;
+    // The schedule is computed by a pure function (see streaming/pacing.hpp); this loop only
+    // performs the syscalls and the sleeps.
+    auto plan = pacing::plan_frame(udp_sink->pacing, udp_sink->pacing_state, num_buffers, std::chrono::steady_clock::now());
+    for (const auto &batch : plan.batches) {
+      if (batch.count == 0) {
+        // Window boundary: wait until the next window opens.
         auto now = std::chrono::steady_clock::now();
-        if (now < due) {
-          std::this_thread::sleep_until(due);
+        if (now < batch.due) {
+          std::this_thread::sleep_until(batch.due);
         }
-        packets_in_window = 0;
         continue;
       }
 
-      std::size_t batch = std::min({budget, pacing.max_batch_size, remaining});
-
-      udp_sink->send_info.block_offset = packets_sent;
-      udp_sink->send_info.block_count = batch;
+      udp_sink->send_info.block_offset = batch.offset;
+      udp_sink->send_info.block_count = batch.count;
       if (!wolf::platform::send_batch(udp_sink->send_info)) {
         success = false;
         break;
       }
-
-      packets_sent += batch;
-      packets_in_window += batch;
     }
-
-    pacing.next_frame_start = frame_start +
-                              std::chrono::nanoseconds(1000000) * packets_sent / pacing.max_packets_per_ms;
+    udp_sink->pacing_state = plan.next_state;
   }
 
   for (auto &[buffer, m] : mapped_buffers) {
