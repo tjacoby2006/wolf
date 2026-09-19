@@ -15,6 +15,14 @@
 std::vector<std::string> linked_devices(std::string_view gpu);
 
 /**
+ * Discover all DRM render nodes available on this system via the kernel DRM subsystem.
+ * Returns paths like /dev/dri/renderD128, /dev/dri/renderD136, ... sorted.
+ * Unlike a plain /dev/dri directory scan, this works even when /dev is not fully
+ * populated inside a container (e.g. only some render nodes are bind-mounted).
+ */
+std::vector<std::string> discover_dri_render_nodes();
+
+/**
  * Given /dev/dri/renderD128 returns renderD128
  * works with symlinks too, /dev/dri/by-path/pci-0000:2d:00.0-render returns renderD128
  */

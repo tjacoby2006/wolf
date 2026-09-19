@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <helpers/logger.hpp>
+#include <platforms/hw.hpp>
 
 namespace state {
 
@@ -119,24 +120,32 @@ struct GpuBalancer {
 };
 
 /**
- * Discover render nodes under /dev/dri (renderD*). Returns an empty list on non-Linux or when the
- * directory is missing, in which case callers fall back to the configured default node only.
+ * Discover render nodes available on this system.
+ *
+ * Primary method: query the kernel DRM subsystem via libdrm (works even when /dev is not fully
+ * populated inside a container). Fallback: scan /dev/dri for renderD* entries.
+ * Returns an empty list on non-Linux, in which case callers fall back to the configured default node only.
  */
 inline std::vector<std::string> discover_render_nodes() {
-  std::vector<std::string> nodes;
-  std::error_code ec;
-  auto dri = std::filesystem::path("/dev/dri");
-  if (!std::filesystem::exists(dri, ec) || ec)
-    return nodes;
+  // Primary: DRM subsystem query (platform-provided)
+  auto nodes = discover_dri_render_nodes();
 
-  for (const auto &entry : std::filesystem::directory_iterator(dri, ec)) {
-    if (ec)
-      break;
-    auto name = entry.path().filename().string();
-    if (name.rfind("renderD", 0) == 0 && std::filesystem::is_regular_file(entry.path(), ec) && !ec) {
-      nodes.push_back(entry.path().string());
+  // Fallback / supplement: filesystem scan of /dev/dri
+  if (nodes.empty()) {
+    std::error_code ec;
+    auto dri = std::filesystem::path("/dev/dri");
+    if (std::filesystem::exists(dri, ec) && !ec) {
+      for (const auto &entry : std::filesystem::directory_iterator(dri, ec)) {
+        if (ec)
+          break;
+        auto name = entry.path().filename().string();
+        if (name.rfind("renderD", 0) == 0 && std::filesystem::is_regular_file(entry.path(), ec) && !ec) {
+          nodes.push_back(entry.path().string());
+        }
+      }
     }
   }
+
   std::sort(nodes.begin(), nodes.end());
   return nodes;
 }

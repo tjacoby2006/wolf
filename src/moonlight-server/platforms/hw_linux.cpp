@@ -126,6 +126,34 @@ void add_character_device(std::vector<std::string> &devices, std::string_view pa
   }
 }
 
+std::vector<std::string> discover_dri_render_nodes() {
+  std::vector<std::string> nodes;
+
+  drmDevicePtr *devices = nullptr;
+  int count = drmGetDevices2(&devices);
+  if (count < 0) {
+    logs::log(logs::warning, "[GPU] drmGetDevices2 failed: {}", strerror(-count));
+    return nodes;
+  }
+
+  for (int i = 0; i < count; ++i) {
+    if (devices[i]->available_nodes & (1 << DRM_NODE_RENDER)) {
+      auto path = devices[i]->nodes[DRM_NODE_RENDER];
+      // Only include nodes that actually exist on the filesystem
+      std::error_code ec;
+      if (std::filesystem::exists(path, ec) && !ec) {
+        nodes.push_back(std::string(path));
+      } else {
+        logs::log(logs::debug, "[GPU] Skipping render node {} (not accessible)", path);
+      }
+    }
+  }
+
+  drmFreeDevices(devices, count);
+  std::sort(nodes.begin(), nodes.end());
+  return nodes;
+}
+
 std::vector<std::string> linked_devices(std::string_view gpu) {
   std::vector<std::string> found_devices;
 
