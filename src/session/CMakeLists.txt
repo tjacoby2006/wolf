@@ -1,7 +1,8 @@
 add_library(wolf_session)
 add_library(wolf::session ALIAS wolf_session)
 
-target_include_directories(wolf_session PUBLIC .)
+# Headers live in src/session/ and are included as <session/...>, so expose the parent (src).
+target_include_directories(wolf_session PUBLIC ..)
 
 target_link_libraries(wolf_session PUBLIC wolf::helpers)
 

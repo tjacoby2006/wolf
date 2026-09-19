@@ -122,6 +122,7 @@ target_link_libraries(
         wolf::moonlight
         wolf::helpers
         wolf::core
+        wolf::platform
         gst-video::context
         cpptrace::cpptrace
         ${Boost_LIBRARIES}

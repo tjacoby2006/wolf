@@ -63,15 +63,6 @@ inline int get_port(STANDARD_PORTS_MAPPING port) {
 using PairedClientList = immer::vector<immer::box<wolf::config::PairedClient>>;
 using ProfilesList = immer::vector<immer::box<events::Profile>>;
 
-enum Encoder {
-  NVIDIA,
-  VAAPI,
-  QUICKSYNC,
-  SOFTWARE,
-  APPLE,
-  UNKNOWN
-};
-
 /**
  * The stored (and user modifiable) configuration
  */

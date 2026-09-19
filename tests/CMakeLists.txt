@@ -24,7 +24,8 @@ set(SRC_LIST
         testRTSP.cpp
         testWolfAPI.cpp
         testBatchedSend.cpp
-        testSession.cpp)
+        testSession.cpp
+        testEncoderPolicy.cpp)
 
 option(TEST_RUST_WAYLAND "Test our custom Rust wayland compositor" ON)
 if (UNIX AND NOT APPLE)
@@ -106,6 +107,7 @@ target_compile_features(wolftests PRIVATE cxx_std_17)
 target_link_libraries_system(wolftests PRIVATE
         wolf::runner
         wolf::session
+        wolf::platform
         Catch2::Catch2)
 
 ## Test assets

@@ -3,6 +3,7 @@
 #include <fstream>
 #include <gst/gstelementfactory.h>
 #include <gst/gstregistry.h>
+#include <platform/video/encoder_policy.hpp>
 #include <platforms/hw.hpp>
 #include <range/v3/view.hpp>
 #include <rfl/toml.hpp>
@@ -31,90 +32,83 @@ void create_default(const std::string &source) {
   out_file.close();
 }
 
-static Encoder encoder_type(const GstEncoder &settings) {
-  switch (utils::hash(settings.plugin_name)) {
-  case (utils::hash("nvcodec")):
-    return NVIDIA;
-  case (utils::hash("vaapi")):
-  case (utils::hash("va")):
-    return VAAPI;
-  case (utils::hash("qsv")):
-    return QUICKSYNC;
-  case (utils::hash("applemedia")):
-    return APPLE;
-  case (utils::hash("x264")):
-  case (utils::hash("x265")):
-  case (utils::hash("aom")):
-    return SOFTWARE;
+/**
+ * Map the server-side hardware vendor enum onto the platform module's vendor enum.
+ * This is the single boundary between hardware probing and the encoder policy.
+ */
+static wolf::platform::GpuVendor to_platform_vendor(GPU_VENDOR vendor) {
+  switch (vendor) {
+  case GPU_VENDOR::NVIDIA:
+    return wolf::platform::GpuVendor::Nvidia;
+  case GPU_VENDOR::AMD:
+    return wolf::platform::GpuVendor::Amd;
+  case GPU_VENDOR::INTEL:
+    return wolf::platform::GpuVendor::Intel;
+  default:
+    return wolf::platform::GpuVendor::Unknown;
   }
-  logs::log(logs::warning, "Unrecognised Gstreamer plugin name: {}", settings.plugin_name);
-  return UNKNOWN;
 }
 
-static bool is_available(const GPU_VENDOR &gpu_vendor, const GstEncoder &settings) {
-  if (auto plugin = gst_registry_find_plugin(gst_registry_get(), settings.plugin_name.c_str())) {
-    gst_object_unref(plugin);
-    return std::all_of(
-        settings.check_elements.begin(),
-        settings.check_elements.end(),
-        [settings, gpu_vendor](const auto &el_name) {
-          // Is the selected GPU vendor compatible with the encoder?
-          // (Particularly useful when using multiple GPUs, e.g. nvcodec might be available but user
-          // wants to encode using the Intel GPU)
-          auto encoder_vendor = encoder_type(settings);
-          if (encoder_vendor == NVIDIA && gpu_vendor != GPU_VENDOR::NVIDIA) {
-            logs::log(logs::debug, "Skipping NVIDIA encoder, not a NVIDIA GPU ({})", (int)gpu_vendor);
-          } else if (encoder_vendor == VAAPI && (gpu_vendor != GPU_VENDOR::INTEL && gpu_vendor != GPU_VENDOR::AMD)) {
-            logs::log(logs::debug, "Skipping VAAPI encoder, not an Intel or AMD GPU ({})", (int)gpu_vendor);
-          } else if (encoder_vendor == QUICKSYNC && gpu_vendor != GPU_VENDOR::INTEL) {
-            logs::log(logs::debug, "Skipping QUICKSYNC encoder, not an Intel GPU ({})", (int)gpu_vendor);
-          }
-          // Can Gstreamer instantiate the element? This will only work if all the drivers are in place
-          else if (auto el = gst_element_factory_make(el_name.c_str(), nullptr)) {
-            gst_object_unref(el);
-            return true;
-          }
+/** Adapt a config `GstEncoder` to the platform module's `EncoderCandidate`. */
+static wolf::platform::EncoderCandidate to_candidate(const GstEncoder &settings) {
+  return wolf::platform::EncoderCandidate{.plugin_name = settings.plugin_name,
+                                          .check_elements = settings.check_elements,
+                                          .video_params = settings.video_params,
+                                          .video_params_zero_copy = settings.video_params_zero_copy,
+                                          .encoder_pipeline = settings.encoder_pipeline};
+}
 
-          return false;
-        });
+/** Adapt a platform `EncoderCandidate` back to a config `GstEncoder`. */
+static GstEncoder to_gst_encoder(const wolf::platform::EncoderCandidate &candidate) {
+  return GstEncoder{.plugin_name = candidate.plugin_name,
+                    .check_elements = candidate.check_elements,
+                    .video_params = candidate.video_params,
+                    .video_params_zero_copy = candidate.video_params_zero_copy,
+                    .encoder_pipeline = candidate.encoder_pipeline};
+}
+
+/**
+ * The real GStreamer probe: can this element be instantiated right now?
+ * This is the only impure part of encoder selection; the policy itself is pure and unit-tested.
+ */
+static bool gst_element_available(const std::string &element_name) {
+  if (auto el = gst_element_factory_make(element_name.c_str(), nullptr)) {
+    gst_object_unref(el);
+    return true;
   }
   return false;
 }
 
-std::optional<GstEncoder> get_encoder(std::string_view tech,
-                                      std::string_view encoder_node,
-                                      const std::vector<GstEncoder> &encoders,
-                                      const GPU_VENDOR &vendor) {
-  auto default_is_available = std::bind(is_available, vendor, std::placeholders::_1);
-  auto encoder = std::find_if(encoders.begin(), encoders.end(), default_is_available);
-  if (encoder != std::end(encoders)) {
-    auto encoder_node_name = get_render_node_name(encoder_node);
-    if (encoder_type(*encoder) == VAAPI && encoder_node_name != "renderD128") {
-      auto possible_vaapi_plugin = fmt::format("va{}{}enc", encoder_node_name, tech);
-      auto possible_encoder = GstEncoder{.plugin_name = encoder->plugin_name,
-                                         .check_elements = {possible_vaapi_plugin, "vapostproc"},
-                                         .video_params = encoder->video_params,
-                                         .video_params_zero_copy = encoder->video_params_zero_copy,
-                                         .encoder_pipeline = encoder->encoder_pipeline};
-      logs::log(logs::debug, "Checking if {} is available", possible_vaapi_plugin);
-      if (is_available(vendor, possible_encoder)) {
-        possible_encoder.encoder_pipeline = std::regex_replace(possible_encoder.encoder_pipeline,
-                                                               std::regex(fmt::format("va{}enc", tech)),
-                                                               possible_vaapi_plugin);
-        logs::log(logs::info, "Detected multiple VAAPI capable devices, using {} encoder", possible_vaapi_plugin);
-        return possible_encoder;
-      }
-    }
-    if (encoder_type(*encoder) == NVIDIA && encoder_node_name != "renderD128") {
-      // TODO: do the same trick for Nvidia and nvh265device{dev-number}enc we have to get that dev-number though..
-    }
-    logs::log(logs::info, "Using {} encoder: {}", tech, encoder->plugin_name);
-    if (encoder_type(*encoder) == SOFTWARE) {
-      logs::log(logs::warning, "Software {} encoder detected", tech);
-    }
-    return *encoder;
+/**
+ * Pick the best encoder for a codec, delegating the vendor/availability policy to the platform
+ * module. Kept as a thin adapter so the rest of the server keeps its existing call shape.
+ */
+static std::optional<GstEncoder> get_encoder(std::string_view tech,
+                                             std::string_view encoder_node,
+                                             const std::vector<GstEncoder> &encoders,
+                                             const GPU_VENDOR &vendor) {
+  std::vector<wolf::platform::EncoderCandidate> candidates;
+  candidates.reserve(encoders.size());
+  for (const auto &encoder : encoders) {
+    candidates.push_back(to_candidate(encoder));
   }
-  return std::nullopt;
+
+  auto picked = wolf::platform::select_encoder(tech,
+                                               candidates,
+                                               to_platform_vendor(vendor),
+                                               get_render_node_name(encoder_node),
+                                               gst_element_available);
+  if (!picked) {
+    return std::nullopt;
+  }
+
+  auto kind = wolf::platform::encoder_kind_from_plugin(picked->plugin_name);
+  if (kind == wolf::platform::EncoderKind::Software) {
+    logs::log(logs::warning, "Software {} encoder detected", tech);
+  } else {
+    logs::log(logs::info, "Using {} encoder: {}", tech, picked->plugin_name);
+  }
+  return to_gst_encoder(*picked);
 }
 
 /**
@@ -299,15 +293,15 @@ Config load_or_default(const std::string &source,
                                                  .opus_encoder = default_gst_audio_settings.default_opus_encoder,
                                                  .sink = default_gst_audio_settings.default_sink};
 
-  auto video_encoder = encoder_type(*h264_encoder);
+  auto video_encoder = wolf::platform::encoder_kind_from_plugin(h264_encoder->plugin_name);
   if (use_zero_copy) {
     switch (video_encoder) {
-    case NVIDIA: {
+    case wolf::platform::EncoderKind::Nvidia: {
       default_base_video.producer_buffer_caps = "video/x-raw(memory:CUDAMemory)";
       break;
     }
-    case VAAPI:
-    case QUICKSYNC: {
+    case wolf::platform::EncoderKind::Vaapi:
+    case wolf::platform::EncoderKind::QuickSync: {
       auto required_caps = gstreamer::get_dma_caps("vapostproc");
       logs::log(logs::debug, "Required DMA formats for vapostproc: {}", required_caps);
       auto gst_caps = required_caps | //
@@ -323,8 +317,7 @@ Config load_or_default(const std::string &source,
                   "Unable to find any compatible DMA formats for vapostproc, disabling zero copy pipeline.");
         use_zero_copy = false;
       } else {
-        default_base_video.producer_buffer_caps =
-            fmt::format("video/x-raw(memory:DMABuf), drm-format={{{}}}", utils::join(gst_caps, ","));
+        default_base_video.producer_buffer_caps = wolf::platform::producer_buffer_caps_for(video_encoder, gst_caps);
       }
       break;
     }
@@ -418,7 +411,9 @@ Config load_or_default(const std::string &source,
                 .hostname = cfg.hostname,
                 .config_source = source,
                 .support_hevc = hevc_encoder.has_value(),
-                .support_av1 = av1_encoder.has_value() && encoder_type(*av1_encoder) != SOFTWARE,
+                .support_av1 = av1_encoder.has_value() &&
+                               wolf::platform::encoder_kind_from_plugin(av1_encoder->plugin_name) !=
+                                   wolf::platform::EncoderKind::Software,
                 .paired_clients = clients_atom,
                 .profiles = profiles_atom,
                 .gpu_pool = gpu_pool};
