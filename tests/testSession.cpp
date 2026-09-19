@@ -15,6 +15,30 @@ public:
   std::vector<SessionEffect> effects;
 };
 
+/**
+ * A runtime that reacts to effects by feeding inputs back, like the real runtime does. Used to
+ * prove the actor <-> runtime feedback loop drives the session to completion on its own.
+ */
+class AutoPilotRuntime : public SessionRuntime {
+public:
+  void execute(const SessionEffect &effect) override {
+    std::visit(
+        [this](const auto &e) {
+          using T = std::decay_t<decltype(e)>;
+          if constexpr (std::is_same_v<T, AssignGpu>) {
+            post(GpuAssigned{.render_node = "/dev/dri/renderD128"});
+          } else if constexpr (std::is_same_v<T, StartDesktop>) {
+            post(DesktopReady{.wayland_socket_name = "wayland-1"});
+          } else if constexpr (std::is_same_v<T, StartRunner>) {
+            post(RunnerStarted{});
+          } else if constexpr (std::is_same_v<T, Teardown>) {
+            post(TeardownComplete{});
+          }
+        },
+        effect);
+  }
+};
+
 SessionModel new_session(std::uint64_t id = 1) {
   SessionModel model;
   model.session_id = id;
@@ -173,4 +197,27 @@ TEST_CASE("actor drives the machine on its own thread", "[session]") {
   REQUIRE(has<StartRunner>(runtime->effects));
   REQUIRE(has<StartStreaming>(runtime->effects));
   REQUIRE(has<Teardown>(runtime->effects));
+}
+
+TEST_CASE("runtime feedback drives the session to completion", "[session]") {
+  // The runtime reacts to each effect by posting the matching input, so the actor should walk the
+  // whole lifecycle without any external input beyond the initial GPU assignment.
+  auto runtime = std::make_shared<AutoPilotRuntime>();
+  SessionActor actor(new_session(7), runtime);
+  actor.start();
+
+  actor.post(GpuAssigned{.render_node = "/dev/dri/renderD128"});
+
+  for (int i = 0; i < 100 && actor.snapshot().state != SessionState::RunnerRunning; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(actor.snapshot().state == SessionState::RunnerRunning);
+
+  actor.post(StopRequested{.reason = "done"});
+  for (int i = 0; i < 100 && actor.snapshot().state != SessionState::Stopped; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(actor.snapshot().state == SessionState::Stopped);
+
+  actor.stop();
 }

@@ -29,6 +29,27 @@ public:
 
   /** Perform an effect. Implementations must eventually push a matching input back. */
   virtual void execute(const SessionEffect &effect) = 0;
+
+  /**
+   * Feed an input back into the owning actor.
+   *
+   * Runtimes call this when an asynchronous effect completes (e.g. the compositor is ready, the
+   * runner exited). It is a no-op until the actor binds its sink in `start()`.
+   */
+  void post(SessionInput input) {
+    if (sink_) {
+      sink_(std::move(input));
+    }
+  }
+
+  /**
+   * Called by the actor to give the runtime a way to feed inputs back. Not intended to be called
+   * by anything else.
+   */
+  void bind_input_sink(std::function<void(SessionInput)> sink) { sink_ = std::move(sink); }
+
+private:
+  std::function<void(SessionInput)> sink_;
 };
 
 /**
@@ -55,6 +76,10 @@ public:
   void start() {
     if (running_.exchange(true)) {
       return;
+    }
+    // Let the runtime feed inputs back into this actor.
+    if (runtime_) {
+      runtime_->bind_input_sink([this](SessionInput input) { post(std::move(input)); });
     }
     worker_ = std::thread([this] { run(); });
   }

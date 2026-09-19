@@ -123,6 +123,7 @@ target_link_libraries(
         wolf::helpers
         wolf::core
         wolf::platform
+        wolf::session
         gst-video::context
         cpptrace::cpptrace
         ${Boost_LIBRARIES}
