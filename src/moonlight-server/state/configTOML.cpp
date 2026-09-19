@@ -5,6 +5,7 @@
 #include <gst/gstregistry.h>
 #include <platforms/hw.hpp>
 #include <range/v3/view.hpp>
+#include <regex>
 #include <rfl/toml.hpp>
 #include <state/config.hpp>
 #include <state/gpu_balancer.hpp>
@@ -115,6 +116,55 @@ std::optional<GstEncoder> get_encoder(std::string_view tech,
     return *encoder;
   }
   return std::nullopt;
+}
+
+/**
+ * Re-point a GStreamer video pipeline's encoder at a specific render node so that encoding happens
+ * on the same GPU as rendering (the "sticky" node picked by the load balancer).
+ *
+ * The encode pipeline is otherwise built once at startup for the default encoder node, so without this
+ * every session would encode on the default GPU even when it renders elsewhere. This only rewrites the
+ * parts of the pipeline that name a specific device:
+ *   - VAAPI/QuickSync encoders take a `device` property (e.g. `vah264enc device=/dev/dri/renderD129`).
+ *   - NVIDIA nvcodec elements are addressed by CUDA device index; we map the render node to its index
+ *     and set `cuda-device` on every element that accepts it (nvh264enc, nvh265enc, nvav1enc, ...).
+ * Software encoders (x264/x265/aom) and pipelines with no recognisable encoder are returned unchanged.
+ */
+std::string apply_encoder_node(const std::string &pipeline, const std::string &render_node) {
+  auto vendor = get_vendor(render_node);
+  if (vendor == GPU_VENDOR::UNKNOWN) {
+    return pipeline;
+  }
+
+  // VAAPI / QuickSync: the encoder element takes a `device` property pointing at the render node.
+  if (vendor == GPU_VENDOR::INTEL || vendor == GPU_VENDOR::AMD) {
+    std::string result = pipeline;
+    for (const auto &tech : {"h264", "h265", "av1"}) {
+      for (const auto &suffix : {"enc", "lpenc"}) {
+        // Match the element name, then insert `device=...` after it if not already present.
+        std::regex re(std::string("(\\bva") + tech + std::string(suffix) + "\\b)(?!\\s*device=)");
+        result = std::regex_replace(result, re, "$1 device=" + render_node);
+      }
+    }
+    return result;
+  }
+
+  // NVIDIA: nvcodec elements are addressed by CUDA device index via the `cuda-device` property.
+  if (vendor == GPU_VENDOR::NVIDIA) {
+    auto idx = get_nvidia_device_index(render_node);
+    if (!idx) {
+      logs::log(logs::warning, "[GSTREAMER] Could not map {} to a CUDA device index; leaving encoder unscoped", render_node);
+      return pipeline;
+    }
+    std::string result = pipeline;
+    for (const auto &el : {"nvh264enc", "nvh265enc", "nvav1enc"}) {
+      std::regex re(std::string("(\\b") + el + std::string("\\b)(?!\\s*cuda-device=)"));
+      result = std::regex_replace(result, re, "$1 cuda-device=" + *idx);
+    }
+    return result;
+  }
+
+  return pipeline;
 }
 
 /**

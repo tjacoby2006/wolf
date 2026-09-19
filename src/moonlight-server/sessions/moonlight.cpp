@@ -60,11 +60,17 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
 
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StopStreamEvent>>(
       [&app_state, plugged_devices_queue, gpu_balancer](const immer::box<events::StopStreamEvent> &ev) {
-        // Release the GPU assigned to this session so it can be reused by the next app
+        // Release the GPU assigned to this session so it can be reused by the next app, and drop the
+        // client's sticky association so a *different* client can take over that node later.
         if (auto session = state::get_session_by_id(app_state->running_sessions->load().get(), ev->session_id)) {
           auto node = session->assigned_render_node;
+          auto client_key = session->ip.empty() ? std::optional<std::string>{} : std::optional<std::string>(session->ip);
           if (!node.empty()) {
-            gpu_balancer->update([node](const state::GpuBalancer &bal) { return bal.release(node); });
+            gpu_balancer->update([node, client_key](const state::GpuBalancer &bal) {
+              return bal.release(node).unstick(client_key.value_or(""));
+            });
+          } else if (client_key.has_value()) {
+            gpu_balancer->update([client_key](const state::GpuBalancer &bal) { return bal.unstick(*client_key); });
           }
         }
 
@@ -97,7 +103,11 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
   // Run process and our custom wayland as soon as a new StreamSession is created
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StreamSession>>(
       [&app_state, plugged_devices_queue, gpu_balancer, runtime_dir, audio_server](const immer::box<events::StreamSession> &session) {
-        /* Assign a GPU to this session (pinned if the app requests one, otherwise load-balanced) */
+        /* Assign a GPU to this session.
+         * Priority: explicit app pin > sticky (same client keeps its previous GPU) > load-balanced.
+         * The client IP is used as the sticky key so that, e.g., launching Wolf UI and then Steam from
+         * the same Moonlight client lands both on the same render/encode node. */
+        auto client_key = session->ip.empty() ? std::optional<std::string>{} : std::optional<std::string>(session->ip);
         {
           std::string usage_str;
           for (const auto &[node, count] : gpu_balancer->load()->usage) {
@@ -110,12 +120,13 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                     session->session_id,
                     usage_str.empty() ? "(none)" : usage_str);
         }
-        auto chosen = gpu_balancer->load()->pick(session->app->gpu_pin);
+        auto chosen = gpu_balancer->load()->pick(session->app->gpu_pin, client_key);
         logs::log(logs::info,
-                  "[STREAM_SESSION] Picked GPU {} for session {} (pin={})",
+                  "[STREAM_SESSION] Picked GPU {} for session {} (pin={}, sticky={})",
                   chosen.has_value() ? *chosen : "<none>",
                   session->session_id,
-                  session->app->gpu_pin.has_value() ? *session->app->gpu_pin : "<none>");
+                  session->app->gpu_pin.has_value() ? *session->app->gpu_pin : "<none>",
+                  client_key.has_value() ? *client_key : "<none>");
         // The pool is discovered at startup and can go stale (GPU reset, driver reload, ...).
         // Handing a dead node to the virtual compositor makes it panic and abort Wolf, so probe first.
         if (chosen.has_value() && !is_render_node_available(*chosen)) {
@@ -143,7 +154,8 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           }
           return v.persistent();
         });
-        gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.acquire(node); });
+        gpu_balancer->update(
+            [node = *chosen, client_key](const state::GpuBalancer &bal) { return bal.acquire_sticky(node, client_key); });
 
         /* Initialise plugged device queue */
         auto devices_q = std::make_shared<events::devices_atom_queue>();

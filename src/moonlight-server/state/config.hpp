@@ -25,6 +25,22 @@ Config load_or_default(const std::string &source,
                        state::SessionsAtoms running_sessions);
 
 /**
+ * @brief Re-point a GStreamer encoder pipeline at the given render node.
+ *
+ * The encoder pipelines are built once at startup against a single default
+ * encoder node.  At stream time the session may have been assigned a
+ * different render node by the GPU balancer; this function rewrites the
+ * encoder element's device property so that encoding follows rendering.
+ *
+ * - VAAPI / QuickSync: inserts `device=<render_node>` after va*h264/h265/av1*enc/lpenc elements.
+ * - NVIDIA: inserts `cuda-device=<index>` after nvh264enc/nvh265enc/nvav1enc elements.
+ *
+ * Returns the pipeline unchanged if the vendor is unknown or no recognised
+ * encoder element is present.
+ */
+std::string apply_encoder_node(const std::string &pipeline, const std::string &render_node);
+
+/**
  * Side effect, will atomically update the paired clients list in cfg
  * and persist the new state to disk
  */

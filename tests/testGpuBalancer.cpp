@@ -1,4 +1,7 @@
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
+#include <platforms/hw.hpp>
+#include <state/config.hpp>
 #include <state/gpu_balancer.hpp>
 
 using namespace state;
@@ -109,5 +112,110 @@ TEST_CASE("GpuBalancer::from_pool builds the pool from config", "[gpu_balancer]"
     std::map<std::string, int> low_weights = {{"renderD128-path", 0}};
     auto balancer = GpuBalancer::from_pool(discovered, low_weights, {}, "/dev/dri/renderD128");
     REQUIRE(balancer.pool.at("/dev/dri/renderD128").weight == 1);
+  }
+}
+
+TEST_CASE("GpuBalancer sticky sessions keep a client on its assigned GPU", "[gpu_balancer][sticky]") {
+  // Equal-weight pool so that without stickiness every pick would tie-break to renderD128.
+  GpuBalancer balancer;
+  balancer.pool["/dev/dri/renderD128"] = GpuInfo{.weight = 1, .excluded = false};
+  balancer.pool["/dev/dri/renderD136"] = GpuInfo{.weight = 1, .excluded = false};
+
+  SECTION("first app from a client is load-balanced as normal") {
+    // No sticky entry yet -> falls through to the load-balance loop.
+    auto chosen = balancer.pick(std::nullopt, std::string("10.0.0.1"));
+    REQUIRE(chosen.has_value());
+  }
+
+  SECTION("second app from the same client sticks to the first node even when it is busier") {
+    // Client 10.0.0.1 gets renderD128 on its first app.
+    auto b = balancer.acquire_sticky("/dev/dri/renderD128", std::string("10.0.0.1"));
+    // A different client grabs renderD136, so 128 is now the busier node.
+    b = b.acquire("/dev/dri/renderD136");
+    // Without stickiness, pick would return renderD136 (usage 1 vs 1, tie-break by path -> 128? no:
+    // both at usage 1, tie broken by lowest usage then path; both equal so path wins -> 128).
+    // To make the test unambiguous, load 128 further so it is strictly busier.
+    b = b.acquire("/dev/dri/renderD128");
+    // Now: 128=2 (score 2.0), 136=1 (score 1.0). Load-balance alone would pick 136.
+    REQUIRE(b.pick(std::nullopt, std::string("10.0.0.1")) == "/dev/dri/renderD128");
+    // A different client with no sticky entry still gets the least-loaded node.
+    REQUIRE(b.pick(std::nullopt, std::string("10.0.0.2")) == "/dev/dri/renderD136");
+  }
+
+  SECTION("sticky is released when the client's stream stops") {
+    auto b = balancer.acquire_sticky("/dev/dri/renderD128", std::string("10.0.0.1"));
+    b = b.acquire("/dev/dri/renderD136");
+    b = b.acquire("/dev/dri/renderD128"); // 128=2, 136=1 -> 128 is busier
+    // Unstick the client (as StopStreamEvent does) and release its node.
+    b = b.release("/dev/dri/renderD128").unstick("10.0.0.1");
+    // Now: 128=1, 136=1. No sticky entry for 10.0.0.1 -> load-balance picks by path -> 128.
+    REQUIRE(b.pick(std::nullopt, std::string("10.0.0.1")) == "/dev/dri/renderD128");
+  }
+
+  SECTION("sticky falls through to load-balance if the stuck node is no longer available") {
+    auto b = balancer.acquire_sticky("/dev/dri/renderD128", std::string("10.0.0.1"));
+    // Exclude the node the client was stuck to (simulates GPU disappearing).
+    b.pool["/dev/dri/renderD128"].excluded = true;
+    REQUIRE(b.pick(std::nullopt, std::string("10.0.0.1")) == "/dev/dri/renderD136");
+  }
+
+  SECTION("no client_key means no stickiness (lobbies / shared sessions)") {
+    auto b = balancer.acquire_sticky("/dev/dri/renderD128", std::nullopt);
+    // acquire_sticky with nullopt must not create a sticky entry.
+    REQUIRE(b.sticky.empty());
+  }
+
+  SECTION("acquire_sticky records the mapping and is visible in the snapshot") {
+    auto b = balancer.acquire_sticky("/dev/dri/renderD136", std::string("192.168.1.50"));
+    REQUIRE(b.sticky.at("192.168.1.50") == "/dev/dri/renderD136");
+  }
+
+  SECTION("unstick on an unknown client is a no-op") {
+    auto b = balancer.unstick("does-not-exist");
+    REQUIRE(b.sticky.empty());
+  }
+}
+
+TEST_CASE("apply_encoder_node re-points the encoder at the session's render node", "[encoder_node]") {
+  SECTION("NVIDIA: nvh264enc gets cuda-device=<index>") {
+    // get_nvidia_device_index is a real syscall-based helper; on a host without NVIDIA it returns
+    // nullopt and apply_encoder_node leaves the pipeline unchanged.  Guard with the vendor check so
+    // the test is meaningful only where the mapping can succeed.
+    auto node = "/dev/dri/renderD128";
+    if (get_vendor(node) == GPU_VENDOR::NVIDIA) {
+      auto idx = get_nvidia_device_index(node);
+      REQUIRE(idx.has_value());
+      auto in = "nvh264enc preset=low-latency-hq zerolatency=true ! fakesink";
+      auto out = apply_encoder_node(in, node);
+      REQUIRE(out.find("nvh264enc cuda-device=" + *idx) != std::string::npos);
+    }
+  }
+
+  SECTION("NVIDIA: already-scoped encoder is not double-annotated") {
+    auto node = "/dev/dri/renderD128";
+    if (get_vendor(node) == GPU_VENDOR::NVIDIA) {
+      auto idx = get_nvidia_device_index(node);
+      REQUIRE(idx.has_value());
+      auto in = "nvh264enc cuda-device=1 preset=low-latency-hq ! fakesink";
+      auto out = apply_encoder_node(in, node);
+      // The negative lookahead must prevent a second cuda-device from being inserted.
+      REQUIRE(std::count(out.begin(), out.end(), 'c') == std::count(in.begin(), in.end(), 'c'));
+    }
+  }
+
+  SECTION("unknown vendor returns the pipeline unchanged") {
+    auto in = "nvh264enc preset=low-latency-hq ! fakesink";
+    // A path that does not resolve to a known DRM device -> UNKNOWN vendor.
+    auto out = apply_encoder_node(in, "/dev/dri/renderD999");
+    REQUIRE(out == in);
+  }
+
+  SECTION("pipeline with no recognisable encoder is returned unchanged") {
+    auto node = "/dev/dri/renderD128";
+    if (get_vendor(node) != GPU_VENDOR::UNKNOWN) {
+      auto in = "x264enc speed-preset=ultrafast ! fakesink";
+      auto out = apply_encoder_node(in, node);
+      REQUIRE(out == in);
+    }
   }
 }

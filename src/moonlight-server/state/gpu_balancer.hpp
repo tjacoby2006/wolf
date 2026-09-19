@@ -32,6 +32,10 @@ struct GpuBalancer {
   std::map<std::string, GpuInfo> pool;
   /** render node path -> number of containers currently using it */
   std::map<std::string, int> usage;
+  /** client identifier (e.g. Moonlight client IP) -> render node it is "stuck" to.
+   *  Lets a client's successive apps keep landing on the same GPU instead of being
+   *  re-balanced onto whichever node happens to be least loaded at that moment. */
+  std::map<std::string, std::string> sticky;
 
   bool is_available(const std::string &node) const {
     auto it = pool.find(node);
@@ -42,12 +46,16 @@ struct GpuBalancer {
    * Pick a render node for a new container.
    *
    * If `pinned_node` is set, that node is used (provided it exists and isn't excluded).
-   * Otherwise we minimise `usage[node] / weight[node]` across the non-excluded pool so that:
+   * Otherwise, if `client_key` names a client we have already placed and that placement is still
+   * valid (node in the pool and not excluded), we stick to it so a user's successive apps keep
+   * rendering/encoding on the same GPU. Failing that we minimise `usage[node] / weight[node]`
+   * across the non-excluded pool so that:
    *  - a now-free GPU (usage dropped to 0) is preferred over round-robin, and
    *  - a higher-weighted GPU (e.g. an RTX 3090 vs a 1660) takes more apps before we spill over.
    * Ties are broken by lowest absolute usage, then by node path for determinism.
    */
-  std::optional<std::string> pick(const std::optional<std::string> &pinned_node) const {
+  std::optional<std::string> pick(const std::optional<std::string> &pinned_node,
+                                  const std::optional<std::string> &client_key = std::nullopt) const {
     if (pinned_node.has_value()) {
       auto node = *pinned_node;
       if (is_available(node)) {
@@ -55,6 +63,13 @@ struct GpuBalancer {
       }
       logs::log(logs::error, "Requested GPU {} is not in the pool or is excluded", node);
       return std::nullopt;
+    }
+
+    // Sticky session: reuse the node this client was last placed on, if it's still usable.
+    if (client_key.has_value()) {
+      if (auto it = sticky.find(*client_key); it != sticky.end() && is_available(it->second)) {
+        return it->second;
+      }
     }
 
     std::optional<std::string> best;
@@ -79,6 +94,26 @@ struct GpuBalancer {
   GpuBalancer acquire(const std::string &node) const {
     auto next = *this;
     next.usage[node] += 1;
+    return next;
+  }
+
+  /**
+   * Increment the active-container count for `node` and record that `client_key` is now using it.
+   * Returns a new snapshot. Used for sessions (as opposed to lobbies, which are shared and don't
+   * belong to a single client).
+   */
+  GpuBalancer acquire_sticky(const std::string &node, const std::optional<std::string> &client_key) const {
+    auto next = acquire(node);
+    if (client_key.has_value()) {
+      next.sticky[*client_key] = node;
+    }
+    return next;
+  }
+
+  /** Drop the sticky association for `client_key` (e.g. when it stops streaming). Returns a new snapshot. */
+  GpuBalancer unstick(const std::string &client_key) const {
+    auto next = *this;
+    next.sticky.erase(client_key);
     return next;
   }
 
