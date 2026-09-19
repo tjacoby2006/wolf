@@ -192,10 +192,14 @@ struct AppState {
   std::shared_ptr<immer::atom<immer::vector<events::Lobby>>> lobbies;
 
   /**
-   * A single global Gstreamer video context shared with all the pipelines
+   * Gstreamer video contexts, keyed by render node (e.g. /dev/dri/renderD128).
+   *
+   * A CUDA context is bound to a single GPU, so we must keep one per render node: sharing a single
+   * context across pipelines running on different GPUs makes the compositor fail with
+   * CUDA_ERROR_INVALID_DEVICE.
    */
-  std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> gst_context =
-      std::make_shared<immer::atom<gst_video_context::gst_context_ptr>>();
+  std::shared_ptr<immer::atom<immer::map<std::string, gst_video_context::gst_context_ptr>>> gst_contexts =
+      std::make_shared<immer::atom<immer::map<std::string, gst_video_context::gst_context_ptr>>>();
 
   /**
    * A list of all currently running (and paused) streaming sessions

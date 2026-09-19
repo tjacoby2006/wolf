@@ -305,7 +305,8 @@ void UnixSocketServer::endpoint_StreamSessionStart(const HTTPRequest &req, std::
       auto video_session = start_req.value().video_session;
       video_session.session_id = session_id; // Can't be JSON encoded
       if (video_session.render_node.empty()) {
-        video_session.render_node = session->app->render_node;
+        video_session.render_node =
+            session->assigned_render_node.empty() ? session->app->render_node : session->assigned_render_node;
       }
       state_->app_state->event_bus->fire_event(immer::box<events::VideoSession>(video_session));
 

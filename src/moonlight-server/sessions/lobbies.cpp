@@ -129,7 +129,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           std::shared_ptr<boost::promise<streaming::WaylandDisplayReady>> on_ready =
               std::make_shared<boost::promise<streaming::WaylandDisplayReady>>();
 
-          std::thread([lobby, lobby_settings, ev_bus, on_ready, gst_context = app_state->gst_context]() {
+          std::thread([lobby, lobby_settings, ev_bus, on_ready, gst_contexts = app_state->gst_contexts]() {
             streaming::start_video_producer(lobby->id,
                                             lobby_settings->video_settings.video_producer_buffer_caps,
                                             lobby->assigned_render_node.empty()
@@ -138,7 +138,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                                             {.width = lobby_settings->video_settings.width,
                                              .height = lobby_settings->video_settings.height,
                                              .refreshRate = lobby_settings->video_settings.refresh_rate},
-                                            gst_context,
+                                            gst_contexts,
                                             on_ready,
                                             ev_bus);
           }).detach();

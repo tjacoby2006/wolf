@@ -156,16 +156,19 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         if (session->app->start_virtual_compositor) {
           logs::log(logs::debug, "[STREAM_SESSION] Create wayland compositor");
 
-          // Start Gstreamer producer pipeline
-          std::thread([session, on_ready, gst_context = app_state->gst_context]() {
+          // Start Gstreamer producer pipeline.
+          // NOTE: `session` is an immutable snapshot, so its `assigned_render_node` is still empty here
+          // (we only wrote the chosen node into `running_sessions` above). Use the freshly picked node
+          // directly, otherwise the compositor would fall back to the app's default render node and
+          // diverge from the runner's GPU (leading to CUDA_ERROR_INVALID_DEVICE).
+          std::thread([session, chosen_node = *chosen, on_ready, gst_contexts = app_state->gst_contexts]() {
             streaming::start_video_producer(std::to_string(session->session_id),
                                             session->app->video_producer_buffer_caps,
-                                            session->assigned_render_node.empty() ? session->app->render_node
-                                                                                   : session->assigned_render_node,
+                                            chosen_node,
                                             {.width = session->display_mode.width,
                                              .height = session->display_mode.height,
                                              .refreshRate = session->display_mode.refreshRate},
-                                            gst_context,
+                                            gst_contexts,
                                             on_ready,
                                             session->event_bus);
           }).detach();
@@ -219,7 +222,7 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         }
 
         // TODO: timeout? What if the wayland display is never ready?
-        auto w_display_ready = on_ready->get_future().then([session, runtime_dir](auto fut) {
+        auto w_display_ready = on_ready->get_future().then([session, chosen_node = *chosen, runtime_dir](auto fut) {
           streaming::WaylandDisplayReady ready = fut.get();
 
           auto wl_state = virtual_display::create_wayland_display(ready.wayland_plugin, ready.wayland_socket_name);
@@ -241,10 +244,14 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           }
 
           logs::log(logs::debug, "[STREAM_SESSION] Start runner");
+          // `session` is an immutable snapshot whose `assigned_render_node` is still empty; carry the
+          // freshly picked node so the runner uses the same GPU as the compositor.
+          auto runner_session = std::make_shared<events::StreamSession>(*session);
+          runner_session->assigned_render_node = chosen_node;
           session->event_bus->fire_event(immer::box<events::StartRunner>(
               events::StartRunner{.stop_stream_when_over = true,
                                   .runner = session->app->runner,
-                                  .stream_session = std::make_shared<events::StreamSession>(*session)}));
+                                  .stream_session = std::move(runner_session)}));
         });
       }));
 
@@ -298,9 +305,9 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
 
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::VideoSession>>(
       [ev_bus = app_state->event_bus,
-       gst_context = app_state->gst_context](const immer::box<events::VideoSession> &sess) {
+       gst_contexts = app_state->gst_contexts](const immer::box<events::VideoSession> &sess) {
         // Start a thread that will wait for the RTP ping event
-        std::thread([sess, ev_bus, gst_context]() {
+        std::thread([sess, ev_bus, gst_contexts]() {
           auto ping_ev = wait_for_ping<events::RTPVideoPingEvent>(ev_bus, sess);
 
           // Start streaming
@@ -308,7 +315,7 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                                            ev_bus,
                                            ping_ev->client_ip,
                                            ping_ev->client_port,
-                                           gst_context,
+                                           gst_contexts,
                                            ping_ev->video_socket.get());
         }).detach();
       }));
