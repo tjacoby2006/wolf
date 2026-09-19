@@ -129,11 +129,28 @@ void add_character_device(std::vector<std::string> &devices, std::string_view pa
 std::vector<std::string> discover_dri_render_nodes() {
   std::vector<std::string> nodes;
 
-  drmDevicePtr *devices = nullptr;
-  int count = drmGetDevices2(&devices);
+  // drmGetDevices2(flags, devices[], max_devices) requires a caller-allocated array and a max
+  // count (unlike the older auto-allocating drmGetDevices). We query in batches, growing the
+  // buffer until the kernel reports it has no more devices to return.
+  constexpr int kInitialBatch = 8;
+  int capacity = kInitialBatch;
+  std::vector<drmDevicePtr> devices(capacity);
+
+  int count = drmGetDevices2(0, devices.data(), capacity);
   if (count < 0) {
     logs::log(logs::warning, "[GPU] drmGetDevices2 failed: {}", strerror(-count));
     return nodes;
+  }
+
+  // If the kernel filled the whole batch there may be more; keep growing until it under-fills.
+  while (count == capacity) {
+    capacity *= 2;
+    devices.resize(capacity);
+    count = drmGetDevices2(0, devices.data(), capacity);
+    if (count < 0) {
+      logs::log(logs::warning, "[GPU] drmGetDevices2 failed while paging: {}", strerror(-count));
+      break;
+    }
   }
 
   for (int i = 0; i < count; ++i) {
@@ -153,7 +170,7 @@ std::vector<std::string> discover_dri_render_nodes() {
     }
   }
 
-  drmFreeDevices(devices, count);
+  drmFreeDevices(devices.data(), count);
   std::sort(nodes.begin(), nodes.end());
   return nodes;
 }
