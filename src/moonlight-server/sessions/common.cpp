@@ -50,8 +50,12 @@ void start_runner(std::shared_ptr<events::Runner> runner,
 
   /* GPU specific adjustments */
   auto render_node = args->video_settings.runner_render_node;
+  logs::log(logs::info, "[RUNNER] Session {} runner render node: {}", args->session_id, render_node);
   auto additional_devices = linked_devices(render_node);
   std::copy(additional_devices.begin(), additional_devices.end(), std::back_inserter(all_devices));
+  for (const auto &d : additional_devices) {
+    logs::log(logs::info, "[RUNNER] Session {} linked device: {}", args->session_id, d);
+  }
 
   auto gpu_vendor = get_vendor(render_node);
   if (gpu_vendor == NVIDIA) {

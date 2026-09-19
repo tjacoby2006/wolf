@@ -91,12 +91,14 @@ void RunDocker::run(std::string_view session_id,
   //  - DeviceRequests + Runtime=nvidia: only meaningful with the toolkit (no driver volume), where it
   //    injects the scoped /dev/nvidia* devices via the nvidia runtime.
   auto final_json_opts = this->base_create_json;
+  logs::log(logs::info, "[DOCKER] Scoping container for session {} to render node {}", session_id, render_node);
   if (get_vendor(render_node) == NVIDIA) {
     auto nvidia_device = get_nvidia_device_index(render_node);
     if (!nvidia_device) {
       logs::log(logs::warning, "[DOCKER] Could not determine NVIDIA device index for {}, falling back to all GPUs", render_node);
     }
     auto visible_devices = nvidia_device ? *nvidia_device : "all";
+    logs::log(logs::info, "[DOCKER] NVIDIA scoping for session {}: visible_devices={}", session_id, visible_devices);
 
     // Setup -e NVIDIA_VISIBLE_DEVICES=<assigned>  -e CUDA_VISIBLE_DEVICES=<assigned>
     // -e NVIDIA_DRIVER_CAPABILITIES=all if not present. Runs in both driver-volume and toolkit modes.
@@ -106,6 +108,8 @@ void RunDocker::run(std::string_view session_id,
       });
       if (nvd_env == full_env.end()) {
         full_env.push_back(fmt::format("NVIDIA_VISIBLE_DEVICES={}", visible_devices));
+      } else {
+        logs::log(logs::warning, "[DOCKER] NVIDIA_VISIBLE_DEVICES already set in env for session {}, skipping scoping", session_id);
       }
 
       auto cuda_env = std::find_if(full_env.begin(), full_env.end(), [](const std::string &env) {

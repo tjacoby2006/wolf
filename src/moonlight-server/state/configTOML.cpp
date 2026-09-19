@@ -380,7 +380,18 @@ Config load_or_default(const std::string &source,
   auto clients_atom = std::make_shared<immer::atom<PairedClientList>>(paired_clients);
 
   /* Build the GPU pool for load balancing: discovered render nodes + user [gpus] weights/exclusions */
-  auto gpu_pool = GpuBalancer::from_pool(discover_render_nodes(), cfg.gpus, cfg.excluded_gpus, default_app_render_node);
+  auto discovered = discover_render_nodes();
+  std::string discovered_str;
+  for (const auto &n : discovered) {
+    if (!discovered_str.empty())
+      discovered_str += ", ";
+    discovered_str += n;
+  }
+  logs::log(logs::info, "[GPU] Discovered {} render node(s): {}", discovered.size(), discovered_str);
+  auto gpu_pool = GpuBalancer::from_pool(discovered, cfg.gpus, cfg.excluded_gpus, default_app_render_node);
+  for (const auto &[node, info] : gpu_pool.pool) {
+    logs::log(logs::info, "[GPU] Pool node: {} (weight={}, excluded={})", node, info.weight, info.excluded);
+  }
 
   /* Get profiles, for each app defined will merge with default settings */
   auto profiles = cfg.profiles | //

@@ -98,7 +98,24 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StreamSession>>(
       [&app_state, plugged_devices_queue, gpu_balancer, runtime_dir, audio_server](const immer::box<events::StreamSession> &session) {
         /* Assign a GPU to this session (pinned if the app requests one, otherwise load-balanced) */
+        {
+          std::string usage_str;
+          for (const auto &[node, count] : gpu_balancer->load()->usage) {
+            if (!usage_str.empty())
+              usage_str += ", ";
+            usage_str += node + "=" + std::to_string(count);
+          }
+          logs::log(logs::info,
+                    "[STREAM_SESSION] GPU balancer before pick (session {}): {}",
+                    session->session_id,
+                    usage_str.empty() ? "(none)" : usage_str);
+        }
         auto chosen = gpu_balancer->load()->pick(session->app->gpu_pin);
+        logs::log(logs::info,
+                  "[STREAM_SESSION] Picked GPU {} for session {} (pin={})",
+                  chosen.has_value() ? *chosen : "<none>",
+                  session->session_id,
+                  session->app->gpu_pin.has_value() ? *session->app->gpu_pin : "<none>");
         // The pool is discovered at startup and can go stale (GPU reset, driver reload, ...).
         // Handing a dead node to the virtual compositor makes it panic and abort Wolf, so probe first.
         if (chosen.has_value() && !is_render_node_available(*chosen)) {
