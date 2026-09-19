@@ -10,6 +10,7 @@
 #include <immer/array.hpp>
 #include <immer/box.hpp>
 #include <memory>
+#include <platform/video/encoder_policy.hpp>
 #include <streaming/streaming.hpp>
 #include <thread>
 
@@ -17,6 +18,20 @@ namespace streaming {
 
 using namespace wolf::core::gstreamer;
 using namespace wolf::core;
+
+/** Map the server-side hardware vendor enum onto the platform module's vendor enum. */
+static wolf::platform::GpuVendor to_platform_vendor(GPU_VENDOR vendor) {
+  switch (vendor) {
+  case GPU_VENDOR::NVIDIA:
+    return wolf::platform::GpuVendor::Nvidia;
+  case GPU_VENDOR::AMD:
+    return wolf::platform::GpuVendor::Amd;
+  case GPU_VENDOR::INTEL:
+    return wolf::platform::GpuVendor::Intel;
+  default:
+    return wolf::platform::GpuVendor::Unknown;
+  }
+}
 
 struct GstBusData {
   std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready;
@@ -381,8 +396,16 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
                            std::shared_ptr<udp::socket> video_socket) {
   auto [color_range, color_space] = get_color_params(video_session);
 
+  // The encoder pipeline is built once at startup against the default encoder node. Re-point it at
+  // the render node actually assigned to this session so encoding follows rendering (otherwise a
+  // session rendering on GPU1 would still encode on GPU0).
+  auto gst_pipeline = wolf::platform::scope_pipeline_to_node(video_session->gst_pipeline,
+                                                             video_session->render_node,
+                                                             to_platform_vendor(get_vendor(video_session->render_node)),
+                                                             get_nvidia_device_index);
+
   auto pipeline = fmt::format(
-      fmt::runtime(video_session->gst_pipeline),
+      fmt::runtime(gst_pipeline),
       fmt::arg("session_id", video_session->session_id),
       fmt::arg("width", video_session->display_mode.width),
       fmt::arg("height", video_session->display_mode.height),
