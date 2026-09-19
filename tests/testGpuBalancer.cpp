@@ -54,7 +54,9 @@ TEST_CASE("GpuBalancer picks the least-loaded GPU by usage/weight", "[gpu_balanc
   }
 
   SECTION("release floors at zero and is idempotent below zero") {
-    auto b = balancer.release("/dev/dri/renderD128").release("/dev/dri/renderD128");
+    // Acquire first so the node has a usage entry; releasing an unknown node is a no-op and
+    // would leave no entry to inspect.
+    auto b = balancer.acquire("/dev/dri/renderD128").release("/dev/dri/renderD128").release("/dev/dri/renderD128");
     REQUIRE(b.usage.at("/dev/dri/renderD128") == 0);
   }
 }
@@ -92,13 +94,18 @@ TEST_CASE("GpuBalancer excludes GPUs from the pool", "[gpu_balancer]") {
 
 TEST_CASE("GpuBalancer::from_pool builds the pool from config", "[gpu_balancer]") {
   std::vector<std::string> discovered = {"/dev/dri/renderD128", "/dev/dri/renderD136"};
-  std::map<std::string, int> weights = {{"renderD128-path", 4}};
+  // The [gpus] table keys on the full render node path (see docs: "/dev/dri/renderD128" = 4).
+  std::map<std::string, int> weights = {{"/dev/dri/renderD128", 4}};
   std::vector<std::string> excluded = {"/dev/dri/renderD136"};
 
   SECTION("applies weights and exclusions, always keeps the default node") {
     auto balancer = GpuBalancer::from_pool(discovered, weights, excluded, "/dev/dri/renderD128");
     REQUIRE(balancer.pool.count("/dev/dri/renderD128") == 1);
     REQUIRE(balancer.pool.count("/dev/dri/renderD136") == 1);
+    // The configured weight must actually be applied to the matching node.
+    REQUIRE(balancer.pool.at("/dev/dri/renderD128").weight == 4);
+    // A node with no configured weight defaults to 1.
+    REQUIRE(balancer.pool.at("/dev/dri/renderD136").weight == 1);
     REQUIRE(balancer.pool.at("/dev/dri/renderD136").excluded == true);
     // default node kept even though it would otherwise be absent
     auto with_default = GpuBalancer::from_pool({}, {}, {}, "/dev/dri/renderD128");
@@ -106,7 +113,7 @@ TEST_CASE("GpuBalancer::from_pool builds the pool from config", "[gpu_balancer]"
   }
 
   SECTION("weight below 1 is clamped to 1") {
-    std::map<std::string, int> low_weights = {{"renderD128-path", 0}};
+    std::map<std::string, int> low_weights = {{"/dev/dri/renderD128", 0}};
     auto balancer = GpuBalancer::from_pool(discovered, low_weights, {}, "/dev/dri/renderD128");
     REQUIRE(balancer.pool.at("/dev/dri/renderD128").weight == 1);
   }
