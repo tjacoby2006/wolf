@@ -11,6 +11,7 @@
 #include <immer/box.hpp>
 #include <memory>
 #include <platform/video/encoder_policy.hpp>
+#include <streaming/gst_bus.hpp>
 #include <streaming/pacing.hpp>
 #include <streaming/streaming.hpp>
 #include <thread>
@@ -32,62 +33,6 @@ static wolf::platform::GpuVendor to_platform_vendor(GPU_VENDOR vendor) {
   default:
     return wolf::platform::GpuVendor::Unknown;
   }
-}
-
-struct GstBusData {
-  std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready;
-  gst_element_ptr wayland_plugin;
-};
-
-gboolean structure_each(GQuark field_id, const GValue *value, gpointer user_data) {
-  auto field_str = std::string(g_quark_to_string(field_id));
-  if (!G_VALUE_HOLDS_STRING(value)) {
-    logs::log(logs::warning, "Wayland source message: {} = {}", field_str, "not a string");
-    return FALSE;
-  }
-  auto value_str = g_value_get_string(value);
-  logs::log(logs::debug, "Wayland source message: {} = {}", field_str, value_str);
-
-  if (field_str == "WAYLAND_DISPLAY") {
-    logs::log(logs::info, "Wayland display ready, listening on: {}", value_str);
-    auto bus_data = static_cast<GstBusData *>(user_data);
-    bus_data->on_ready->set_value(
-        WaylandDisplayReady{.wayland_socket_name = value_str, .wayland_plugin = bus_data->wayland_plugin});
-  }
-
-  return TRUE;
-}
-
-static void application_message_handler(GstBus *bus, GstMessage *msg, gpointer data) {
-  auto structure = gst_message_get_structure(msg);
-  if (gst_structure_has_name(structure, "wayland.src")) {
-    gst_structure_foreach(structure, structure_each, data);
-  }
-}
-
-struct NeedContextData {
-  const std::string device_path;
-  std::shared_ptr<immer::atom<immer::map<std::string, gst_video_context::gst_context_ptr>>> gst_contexts;
-};
-
-static void need_context_handler(GstBus *bus, GstMessage *msg, gpointer data) {
-  auto ctx_data = static_cast<NeedContextData *>(data);
-  // A CUDA context is bound to a single GPU, so look up (and cache) the context for this render node.
-  if (auto gst_context = ctx_data->gst_contexts->load()->find(ctx_data->device_path)) {
-    logs::log(logs::debug, "Context already set for {}, passing it to the pipeline.", ctx_data->device_path);
-    gst_video_context::set_context(*gst_context, msg);
-  } else if (auto video_context = gst_video_context::need_context_for_device(ctx_data->device_path, msg)) {
-    ctx_data->gst_contexts->update([device_path = ctx_data->device_path, video_context](const auto &contexts) {
-      return contexts.set(device_path, video_context);
-    });
-  }
-}
-
-static GstBusSyncReply bus_sync_handler(GstBus *bus, GstMessage *msg, gpointer data) {
-  if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_NEED_CONTEXT) {
-    need_context_handler(bus, msg, data);
-  }
-  return GST_BUS_PASS;
 }
 
 std::pair<std::string, std::string> get_color_params(immer::box<events::VideoSession> video_session) {
@@ -125,9 +70,9 @@ void start_video_producer(const std::string &session_id,
                               fmt::arg("fps", display_mode.refreshRate));
   logs::log(logs::debug, "[GSTREAMER] Starting video producer: {}", pipeline);
   auto bus_data_ptr =
-      std::make_shared<GstBusData>(GstBusData{.on_ready = std::move(on_ready), .wayland_plugin = nullptr});
-  std::shared_ptr<NeedContextData> ctx_data_ptr =
-      std::make_shared<NeedContextData>(NeedContextData{.device_path = render_node, .gst_contexts = video_contexts});
+      std::make_shared<gst_bus::WaylandBusData>(gst_bus::WaylandBusData{.on_ready = std::move(on_ready), .wayland_plugin = nullptr});
+  std::shared_ptr<gst_bus::ContextBusData> ctx_data_ptr =
+      std::make_shared<gst_bus::ContextBusData>(gst_bus::ContextBusData{.device_path = render_node, .gst_contexts = video_contexts});
   run_pipeline(pipeline, [=](auto pipeline) {
     logs::log(logs::debug, "Setting up waylanddisplaysrc");
 
@@ -136,8 +81,8 @@ void start_video_producer(const std::string &session_id,
     bus_data_ptr->wayland_plugin.swap(wayland_plugin_ptr);
 
     auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
-    g_signal_connect(bus, "message::application", G_CALLBACK(application_message_handler), bus_data_ptr.get());
-    gst_bus_set_sync_handler(bus, bus_sync_handler, ctx_data_ptr.get(), nullptr);
+    g_signal_connect(bus, "message::application", G_CALLBACK(gst_bus::application_message_handler), bus_data_ptr.get());
+    gst_bus_set_sync_handler(bus, gst_bus::bus_sync_handler, ctx_data_ptr.get(), nullptr);
     gst_object_unref(bus);
 
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
@@ -409,8 +354,8 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
               std::max(1L, static_cast<long>(1000000000L * 80 / 100 / 1000 / (video_session->packet_size * 8)))),
           .max_batch_size = std::min<std::size_t>(16, 65536 / video_session->packet_size),
       }});
-  std::shared_ptr<NeedContextData> ctx_data_ptr = std::make_shared<NeedContextData>(
-      NeedContextData{.device_path = video_session->render_node, .gst_contexts = video_contexts});
+  std::shared_ptr<gst_bus::ContextBusData> ctx_data_ptr = std::make_shared<gst_bus::ContextBusData>(
+      gst_bus::ContextBusData{.device_path = video_session->render_node, .gst_contexts = video_contexts});
   run_pipeline(pipeline, [video_session, event_bus, udp_sink, ctx_data_ptr](auto pipeline) {
     if (auto app_sink_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_udp_sink")) {
       logs::log(logs::debug, "Setting up wolf_udp_sink");
@@ -420,7 +365,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
     }
 
     auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
-    gst_bus_set_sync_handler(bus, bus_sync_handler, ctx_data_ptr.get(), nullptr);
+    gst_bus_set_sync_handler(bus, gst_bus::bus_sync_handler, ctx_data_ptr.get(), nullptr);
     gst_object_unref(bus);
 
     /*
