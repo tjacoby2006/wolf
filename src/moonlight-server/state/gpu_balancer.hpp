@@ -122,35 +122,81 @@ struct GpuBalancer {
 /**
  * Discover render nodes available on this system.
  *
- * Primary method: query the kernel DRM subsystem via libdrm (works even when /dev is not fully
- * populated inside a container). Fallback: scan /dev/dri for renderD* entries.
- * Returns an empty list on non-Linux, in which case callers fall back to the configured default node only.
+ * Three enumeration sources are merged (each may see nodes the others miss inside a container):
+ *   1. A scan of /dev/dri for renderD* entries.
+ *   2. A scan of /sys/class/dri for cardN entries, mapped to their render node via the
+ *      sysfs `device/renderD*` symlink (works when /dev is only partially populated).
+ *   3. The kernel DRM subsystem query (libdrm drmGetDevices2).
+ *
+ * Every candidate is then validated with probe_render_node(), which opens the node and calls
+ * drmGetDevice2(). This deliberately does NOT rely on std::filesystem::exists(): inside containers
+ * (e.g. Unraid / bind-mounted /dev) a device node can be fully usable via open() while exists()
+ * reports false — that mismatch is exactly what made discovery silently return 0 nodes even though
+ * the GPU was perfectly streamable. Returns an empty list on non-Linux, in which case callers fall
+ * back to the configured default node only.
  */
 inline std::vector<std::string> discover_render_nodes() {
-  std::vector<std::string> nodes;
+  std::vector<std::string> candidates;
   std::error_code ec;
 
-  // Primary: filesystem scan of /dev/dri for renderD* entries.
-  // We only require the entry to exist (not is_regular_file) because inside containers
-  // device nodes may not report as regular files via std::filesystem.
+  // 1) Filesystem scan of /dev/dri for renderD* entries. We do NOT gate on exists() here: the
+  //    directory_iterator already yields real entries, and probe_render_node() below is the
+  //    authoritative check (exists() is unreliable for bind-mounted device nodes in containers).
   auto dri = std::filesystem::path("/dev/dri");
   if (std::filesystem::exists(dri, ec) && !ec) {
     for (const auto &entry : std::filesystem::directory_iterator(dri, ec)) {
       if (ec)
         break;
       auto name = entry.path().filename().string();
-      if (name.rfind("renderD", 0) == 0 && std::filesystem::exists(entry.path(), ec) && !ec) {
-        nodes.push_back(entry.path().string());
+      if (name.rfind("renderD", 0) == 0) {
+        candidates.push_back(entry.path().string());
       }
     }
   }
 
-  // Supplement: DRM subsystem query may find nodes not visible in /dev/dri
-  // (e.g. when /dev is not fully populated). Merge any additional nodes.
-  for (const auto &node : discover_dri_render_nodes()) {
-    if (std::find(nodes.begin(), nodes.end(), node) == nodes.end()) {
-      nodes.push_back(node);
+  // 2) Sysfs scan of /sys/class/dri for cardN entries, mapped to their render node. The kernel
+  //    exposes each GPU's render node as a symlink under the card's device dir (renderD128 etc.).
+  //    This finds nodes even when /dev is only partially populated inside a container.
+  auto sys_dri = std::filesystem::path("/sys/class/dri");
+  if (std::filesystem::exists(sys_dri, ec) && !ec) {
+    for (const auto &entry : std::filesystem::directory_iterator(sys_dri, ec)) {
+      if (ec)
+        break;
+      auto name = entry.path().filename().string();
+      if (name.rfind("card", 0) != 0)
+        continue; // only cardN entries
+      auto device_dir = entry.path() / "device";
+      for (const auto &render_entry : std::filesystem::directory_iterator(device_dir, ec)) {
+        if (ec)
+          break;
+        auto render_name = render_entry.path().filename().string();
+        if (render_name.rfind("renderD", 0) == 0) {
+          candidates.push_back("/dev/dri/" + render_name);
+        }
+      }
     }
+  }
+
+  // 3) Kernel DRM subsystem query (libdrm). May surface nodes not visible via the filesystem scans.
+  for (const auto &node : discover_dri_render_nodes()) {
+    candidates.push_back(node);
+  }
+
+  // Validate each unique candidate by actually opening it as a DRM render node. This is the single
+  // source of truth for "is this GPU usable right now" and replaces the unreliable exists() gate.
+  std::vector<std::string> nodes;
+  auto add_if_valid = [&](const std::string &node) {
+    if (std::find(nodes.begin(), nodes.end(), node) != nodes.end())
+      return;
+    if (probe_render_node(node)) {
+      nodes.push_back(node);
+    } else {
+      logs::log(logs::debug, "[GPU] Skipping candidate render node {} (not openable as a DRM device)", node);
+    }
+  };
+
+  for (const auto &node : candidates) {
+    add_if_valid(node);
   }
 
   std::sort(nodes.begin(), nodes.end());

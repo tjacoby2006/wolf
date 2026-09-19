@@ -38,6 +38,19 @@ std::string get_render_node_name(std::string_view render_node);
 bool is_render_node_available(std::string_view render_node);
 
 /**
+ * Probe whether a path is an openable DRM render node, WITHOUT relying on
+ * std::filesystem::exists().
+ *
+ * Inside containers (especially Unraid / bind-mounted /dev) a device node can be perfectly
+ * usable via open() while std::filesystem::exists() reports false — which is exactly the case
+ * that made GPU discovery silently return 0 nodes. This probe opens the node and calls
+ * drmGetDevice2(), mirroring what get_vendor()/is_render_node_available() already do, so it
+ * succeeds whenever the kernel actually accepts the fd. Returns true only for nodes that are
+ * both openable AND expose a DRM render node.
+ */
+bool probe_render_node(std::string_view render_node);
+
+/**
  * Given a render node (ex: /dev/dri/renderD136) returns the corresponding NVIDIA device index
  * (ex: "1") for use with NVIDIA_VISIBLE_DEVICES / DeviceRequests.DeviceIDs.
  * Returns std::nullopt if the GPU is not NVIDIA or the index cannot be determined.

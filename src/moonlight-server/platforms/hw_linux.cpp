@@ -137,21 +137,46 @@ std::vector<std::string> discover_dri_render_nodes() {
   }
 
   for (int i = 0; i < count; ++i) {
-    if (devices[i]->available_nodes & (1 << DRM_NODE_RENDER)) {
-      auto path = devices[i]->nodes[DRM_NODE_RENDER];
-      // Only include nodes that actually exist on the filesystem
-      std::error_code ec;
-      if (std::filesystem::exists(path, ec) && !ec) {
-        nodes.push_back(std::string(path));
-      } else {
-        logs::log(logs::debug, "[GPU] Skipping render node {} (not accessible)", path);
-      }
+    auto available = devices[i]->available_nodes;
+    if (!(available & (1 << DRM_NODE_RENDER))) {
+      continue;
+    }
+    auto path = devices[i]->nodes[DRM_NODE_RENDER];
+    // Validate the node by actually opening it rather than relying on
+    // std::filesystem::exists(), which reports false for bind-mounted device
+    // nodes inside containers even when open() succeeds (the bug that made
+    // discovery return 0 nodes). probe_render_node() opens + drmGetDevice2().
+    if (probe_render_node(path)) {
+      nodes.push_back(std::string(path));
+    } else {
+      logs::log(logs::debug, "[GPU] Skipping render node {} (not openable as a DRM device)", path);
     }
   }
 
   drmFreeDevices(devices, count);
   std::sort(nodes.begin(), nodes.end());
   return nodes;
+}
+
+bool probe_render_node(std::string_view render_node) {
+  if (render_node.empty()) {
+    return false;
+  }
+  auto fd = open(render_node.data(), O_RDWR | O_CLOEXEC);
+  if (fd < 0) {
+    // Not fatal: the node may simply be absent in this container. The caller
+    // logs at debug level when it expects a node to be present.
+    return false;
+  }
+  drmDevice *dev = nullptr;
+  auto ret = drmGetDevice2(fd, 0, &dev);
+  close(fd);
+  if (ret < 0 || dev == nullptr) {
+    return false;
+  }
+  bool has_render = (dev->available_nodes & (1 << DRM_NODE_RENDER)) != 0;
+  drmFreeDevice(&dev);
+  return has_render;
 }
 
 std::vector<std::string> linked_devices(std::string_view gpu) {
