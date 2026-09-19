@@ -127,22 +127,29 @@ struct GpuBalancer {
  * Returns an empty list on non-Linux, in which case callers fall back to the configured default node only.
  */
 inline std::vector<std::string> discover_render_nodes() {
-  // Primary: DRM subsystem query (platform-provided)
-  auto nodes = discover_dri_render_nodes();
+  std::vector<std::string> nodes;
+  std::error_code ec;
 
-  // Fallback / supplement: filesystem scan of /dev/dri
-  if (nodes.empty()) {
-    std::error_code ec;
-    auto dri = std::filesystem::path("/dev/dri");
-    if (std::filesystem::exists(dri, ec) && !ec) {
-      for (const auto &entry : std::filesystem::directory_iterator(dri, ec)) {
-        if (ec)
-          break;
-        auto name = entry.path().filename().string();
-        if (name.rfind("renderD", 0) == 0 && std::filesystem::is_regular_file(entry.path(), ec) && !ec) {
-          nodes.push_back(entry.path().string());
-        }
+  // Primary: filesystem scan of /dev/dri for renderD* entries.
+  // We only require the entry to exist (not is_regular_file) because inside containers
+  // device nodes may not report as regular files via std::filesystem.
+  auto dri = std::filesystem::path("/dev/dri");
+  if (std::filesystem::exists(dri, ec) && !ec) {
+    for (const auto &entry : std::filesystem::directory_iterator(dri, ec)) {
+      if (ec)
+        break;
+      auto name = entry.path().filename().string();
+      if (name.rfind("renderD", 0) == 0 && std::filesystem::exists(entry.path(), ec) && !ec) {
+        nodes.push_back(entry.path().string());
       }
+    }
+  }
+
+  // Supplement: DRM subsystem query may find nodes not visible in /dev/dri
+  // (e.g. when /dev is not fully populated). Merge any additional nodes.
+  for (const auto &node : discover_dri_render_nodes()) {
+    if (std::find(nodes.begin(), nodes.end(), node) == nodes.end()) {
+      nodes.push_back(node);
     }
   }
 
