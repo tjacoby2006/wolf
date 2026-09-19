@@ -10,7 +10,6 @@
 #include <immer/array.hpp>
 #include <immer/box.hpp>
 #include <memory>
-#include <state/config.hpp>
 #include <streaming/streaming.hpp>
 #include <thread>
 
@@ -382,12 +381,8 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
                            std::shared_ptr<udp::socket> video_socket) {
   auto [color_range, color_space] = get_color_params(video_session);
 
-  // The encoder pipeline was built at startup against a single default encoder node.
-  // Re-point it at the render node actually assigned to this session so that
-  // encoding follows rendering (Bug: encode on GPU0 while rendering on GPU1).
-  auto gst_pipeline = state::apply_encoder_node(video_session->gst_pipeline, video_session->render_node);
   auto pipeline = fmt::format(
-      fmt::runtime(gst_pipeline),
+      fmt::runtime(video_session->gst_pipeline),
       fmt::arg("session_id", video_session->session_id),
       fmt::arg("width", video_session->display_mode.width),
       fmt::arg("height", video_session->display_mode.height),
