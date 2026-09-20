@@ -43,9 +43,6 @@ struct SessionModel {
 
   /** Human-readable failure reason when `state == Failed`. */
   std::string failure_reason;
-
-  /** Number of ticks spent waiting for the RTP ping (drives the ping timeout). */
-  int ping_wait_ticks = 0;
 };
 
 /**

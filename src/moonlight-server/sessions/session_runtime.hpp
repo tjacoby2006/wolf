@@ -58,6 +58,9 @@ private:
   void start_desktop(std::uint64_t session_id, const std::string &render_node);
   void start_runner(std::uint64_t session_id, const std::string &render_node);
   void start_streaming(std::uint64_t session_id, const std::string &client_ip, std::uint16_t client_port);
+  void forward_pause(std::uint64_t session_id);
+  void forward_resume(std::uint64_t session_id);
+  void forward_idr(std::uint64_t session_id);
   void teardown(std::uint64_t session_id, const std::string &reason);
   void release_gpu(std::uint64_t session_id);
 

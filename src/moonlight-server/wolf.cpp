@@ -207,8 +207,10 @@ void run() {
   }).detach();
 
   // Control
-  std::thread([sessions = local_state->running_sessions, ev_bus = local_state->event_bus]() {
-    control::run_control(state::get_port(state::CONTROL_PORT), sessions, ev_bus);
+  std::thread([sessions = local_state->running_sessions,
+               ev_bus = local_state->event_bus,
+               actors = local_state->session_actors]() {
+    control::run_control(state::get_port(state::CONTROL_PORT), sessions, ev_bus, actors);
   }).detach();
 
   // RTP

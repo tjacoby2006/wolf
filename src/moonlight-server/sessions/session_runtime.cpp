@@ -28,21 +28,45 @@ void MoonlightSessionRuntime::execute(const SessionEffect &effect) {
           start_runner(e.session_id, e.render_node);
         } else if constexpr (std::is_same_v<T, StartStreaming>) {
           start_streaming(e.session_id, e.client_ip, e.client_port);
+        } else if constexpr (std::is_same_v<T, PauseStreaming>) {
+          forward_pause(e.session_id);
+        } else if constexpr (std::is_same_v<T, ResumeStreaming>) {
+          forward_resume(e.session_id);
+        } else if constexpr (std::is_same_v<T, RequestIdr>) {
+          forward_idr(e.session_id);
         } else if constexpr (std::is_same_v<T, Teardown>) {
           teardown(e.session_id, e.reason);
         } else if constexpr (std::is_same_v<T, ReleaseGpu>) {
           release_gpu(e.session_id);
         } else {
-          // PauseStreaming / ResumeStreaming / RequestIdr / PlugDevice / UnplugDevice are part of
-          // the state machine's vocabulary but are not yet driven by any input: stream control
-          // (pause/resume/IDR) and device hotplug still go straight through the event bus, where
-          // the streaming pipelines and the Docker runner consume them. The actor owns the
-          // startup/teardown lifecycle; these remain bus-driven until they are routed through the
-          // actor too.
+          // PlugDevice / UnplugDevice are part of the state machine's vocabulary but are not yet
+          // driven by any input: device hotplug still goes straight through the event bus, where
+          // the Docker runner consumes it.
           logs::log(logs::debug, "[SESSION] Effect {} is not yet driven by the actor", typeid(T).name());
         }
       },
       effect);
+}
+
+/*
+ * The streaming pipelines subscribe to these events on the bus. The actor is the single entry
+ * point for the lifecycle, so it forwards the corresponding effects onto the bus rather than the
+ * protocol adapters firing events directly. This keeps the pipelines unchanged while giving the
+ * session one owner.
+ */
+void MoonlightSessionRuntime::forward_pause(std::uint64_t session_id) {
+  context_.stream_session->event_bus->fire_event(
+      immer::box<events::PauseStreamEvent>(events::PauseStreamEvent{.session_id = session_id}));
+}
+
+void MoonlightSessionRuntime::forward_resume(std::uint64_t session_id) {
+  context_.stream_session->event_bus->fire_event(
+      immer::box<events::ResumeStreamEvent>(events::ResumeStreamEvent{.session_id = session_id}));
+}
+
+void MoonlightSessionRuntime::forward_idr(std::uint64_t session_id) {
+  context_.stream_session->event_bus->fire_event(
+      immer::box<events::IDRRequestEvent>(events::IDRRequestEvent{.session_id = session_id}));
 }
 
 void MoonlightSessionRuntime::assign_gpu(std::uint64_t session_id) {

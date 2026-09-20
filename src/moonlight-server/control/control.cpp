@@ -131,6 +131,7 @@ std::shared_ptr<ENetPeer> to_shared_ptr(ENetPeer *peer) {
 void run_control(int port,
                  const state::SessionsAtoms &running_sessions,
                  const std::shared_ptr<events::EventBusType> &event_bus,
+                 const std::shared_ptr<immer::atom<session_actor_map>> &session_actors,
                  int peers,
                  std::chrono::milliseconds timeout,
                  const std::string &host_ip) {
@@ -141,6 +142,33 @@ void run_control(int port,
   ENetEvent event;
 
   immer::atom<enet_clients_map> connected_clients;
+
+  /*
+   * Route a stream-control signal to the session's actor when one exists, so the actor remains the
+   * single owner of the lifecycle. Falls back to the event bus for sessions without an actor
+   * (e.g. lobbies), which the streaming pipelines still consume directly.
+   */
+  auto post_or_fire_pause = [&session_actors, &event_bus](std::uint64_t session_id) {
+    if (auto actor = session_actors->load()->find(session_id)) {
+      (*actor)->post(wolf::session::PauseRequested{});
+      return;
+    }
+    event_bus->fire_event(immer::box<PauseStreamEvent>(PauseStreamEvent{.session_id = session_id}));
+  };
+  auto post_or_fire_resume = [&session_actors, &event_bus](std::uint64_t session_id) {
+    if (auto actor = session_actors->load()->find(session_id)) {
+      (*actor)->post(wolf::session::ResumeRequested{});
+      return;
+    }
+    event_bus->fire_event(immer::box<ResumeStreamEvent>(ResumeStreamEvent{.session_id = session_id}));
+  };
+  auto post_or_fire_idr = [&session_actors, &event_bus](std::uint64_t session_id) {
+    if (auto actor = session_actors->load()->find(session_id)) {
+      (*actor)->post(wolf::session::IdrRequested{});
+      return;
+    }
+    event_bus->fire_event(immer::box<IDRRequestEvent>(IDRRequestEvent{.session_id = session_id}));
+  };
 
   auto stop_ev = event_bus->register_handler<immer::box<StopStreamEvent>>(
       [&connected_clients](const immer::box<StopStreamEvent> &ev) {
@@ -169,14 +197,12 @@ void run_control(int port,
           connected_clients.update([peer = event.peer, client_session](const enet_clients_map &m) {
             return m.set(peer, client_session.value());
           });
-          event_bus->fire_event(
-              immer::box<ResumeStreamEvent>(ResumeStreamEvent{.session_id = client_session->session_id}));
+          post_or_fire_resume(client_session->session_id);
           break;
         case ENET_EVENT_TYPE_DISCONNECT:
           logs::log(logs::debug, "[ENET] disconnected client: {}:{}", client_ip, client_port);
           connected_clients.update([peer = event.peer](const enet_clients_map &m) { return m.erase(peer); });
-          event_bus->fire_event(
-              immer::box<PauseStreamEvent>(PauseStreamEvent{.session_id = client_session->session_id}));
+          post_or_fire_pause(client_session->session_id);
           break;
         case ENET_EVENT_TYPE_RECEIVE:
           enet_packet packet = {event.packet, enet_packet_destroy};
@@ -203,14 +229,12 @@ void run_control(int port,
                         crypto::str_to_hex(decrypted));
 
               if (sub_type == TERMINATION) {
-                event_bus->fire_event(
-                    immer::box<PauseStreamEvent>(PauseStreamEvent{.session_id = client_session->session_id}));
+                post_or_fire_pause(client_session->session_id);
               } else if (sub_type == INPUT_DATA) {
                 immer::box<std::shared_ptr<ENetPeer>> enet_client = {to_shared_ptr(event.peer)};
                 handle_input(client_session.value(), enet_client, (INPUT_PKT *)decrypted.data());
               } else if (sub_type == IDR_FRAME) {
-                auto ev = IDRRequestEvent{.session_id = client_session->session_id};
-                event_bus->fire_event(immer::box<IDRRequestEvent>{ev});
+                post_or_fire_idr(client_session->session_id);
               }
             } catch (std::runtime_error &e) {
               logs::log(logs::warning, "[ENET] Unable to decrypt incoming packet: {}", e.what());

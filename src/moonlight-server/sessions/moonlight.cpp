@@ -136,6 +136,33 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         });
       }));
 
+  /*
+   * Route the client's RTP ping to the session's actor so it can advance to `Streaming`.
+   *
+   * The ping is matched against the session exactly as the old `wait_for_ping` did: the client
+   * echoes back the per-session secret payload exchanged over RTSP, or (for older clients that
+   * send no payload) the ping's IP and port match the session's.
+   */
+  handlers.push_back(app_state->event_bus->register_handler<immer::box<events::RTPVideoPingEvent>>(
+      [&app_state, active_actors](const immer::box<events::RTPVideoPingEvent> &ping) {
+        for (const auto &session : app_state->running_sessions->load().get()) {
+          // Mirrors the legacy `wait_for_ping` matching: payload match when the client echoes the
+          // secret, otherwise the IP/port fallback (which compared against the session's video
+          // stream port).
+          bool matches = ping->payload.has_value()
+                             ? session.rtp_secret_payload == *ping->payload
+                             : (ping->client_ip == session.ip && ping->client_port == session.video_stream_port);
+          if (!matches) {
+            continue;
+          }
+          if (auto actor = active_actors->load()->find(session.session_id)) {
+            (*actor)->post(wolf::session::RtpPingReceived{.client_ip = ping->client_ip,
+                                                          .client_port = ping->client_port});
+          }
+          return;
+        }
+      }));
+
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::VideoSession>>(
       [ev_bus = app_state->event_bus,
        gst_contexts = app_state->gst_contexts](const immer::box<events::VideoSession> &sess) {
