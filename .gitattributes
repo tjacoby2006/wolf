@@ -1,0 +1,36 @@
+# Normalize line endings in the repository.
+#
+# Shell scripts and Dockerfiles MUST use LF: a CRLF shebang (`#!/bin/bash\r`) is not recognised by
+# the kernel, so the script falls back to /bin/sh and `set -e\r` fails with "Illegal option -".
+# This bit us on Windows checkouts where core.autocrlf=true rewrote them to CRLF.
+* text=auto eol=lf
+
+*.sh            text eol=lf
+*.bash          text eol=lf
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
+*.dockerfile    text eol=lf
+*.toml          text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.json          text eol=lf
+*.md            text eol=lf
+*.adoc          text eol=lf
+
+# Windows-only files keep CRLF.
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+*.ps1           text eol=crlf
+
+# Binary files must never be touched.
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.pdf           binary
+*.so            binary
+*.a             binary
+*.o             binary
+*.woff          binary
+*.woff2         binary

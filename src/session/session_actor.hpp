@@ -15,6 +15,8 @@
 
 namespace wolf::session {
 
+class SessionActor;
+
 /**
  * The runtime side of a session: it interprets the effects emitted by the state machine and
  * feeds the resulting inputs back into the actor.
@@ -22,8 +24,14 @@ namespace wolf::session {
  * The state machine never touches hardware, containers or the network. Everything with a side
  * effect goes through this interface, which is what makes the lifecycle testable (a fake runtime
  * can be driven in a unit test) and keeps the actor free of GStreamer/Docker/PulseAudio deps.
+ *
+ * Lifetime: a runtime may spawn detached threads that outlive the actor (e.g. the compositor
+ * startup or the runner, which blocks for the container's lifetime). Those threads must hold a
+ * `shared_ptr` to the runtime (via `shared_from_this()`) so it stays alive, and `post()` holds
+ * only a *weak* reference to the actor, so a late completion after the session was torn down is
+ * safely dropped instead of dereferencing a destroyed actor.
  */
-class SessionRuntime {
+class SessionRuntime : public std::enable_shared_from_this<SessionRuntime> {
 public:
   virtual ~SessionRuntime() = default;
 
@@ -33,23 +41,19 @@ public:
   /**
    * Feed an input back into the owning actor.
    *
-   * Runtimes call this when an asynchronous effect completes (e.g. the compositor is ready, the
-   * runner exited). It is a no-op until the actor binds its sink in `start()`.
+   * Safe to call from any thread, including after the actor has been destroyed (in which case it
+   * is a no-op). Runtimes call this when an asynchronous effect completes.
    */
-  void post(SessionInput input) {
-    if (sink_) {
-      sink_(std::move(input));
-    }
-  }
+  void post(SessionInput input);
 
   /**
    * Called by the actor to give the runtime a way to feed inputs back. Not intended to be called
    * by anything else.
    */
-  void bind_input_sink(std::function<void(SessionInput)> sink) { sink_ = std::move(sink); }
+  void bind_actor(std::weak_ptr<SessionActor> actor) { actor_ = std::move(actor); }
 
 private:
-  std::function<void(SessionInput)> sink_;
+  std::weak_ptr<SessionActor> actor_;
 };
 
 /**
@@ -62,7 +66,7 @@ private:
  * This replaces the old design where a session was mutated from many detached threads and
  * event-bus handlers with no single owner.
  */
-class SessionActor {
+class SessionActor : public std::enable_shared_from_this<SessionActor> {
 public:
   SessionActor(SessionModel initial, std::shared_ptr<SessionRuntime> runtime)
       : model_(std::move(initial)), runtime_(std::move(runtime)) {}
@@ -77,9 +81,10 @@ public:
     if (running_.exchange(true)) {
       return;
     }
-    // Let the runtime feed inputs back into this actor.
+    // Let the runtime feed inputs back into this actor. The runtime holds a weak reference, so a
+    // late completion after this actor is destroyed is safely dropped.
     if (runtime_) {
-      runtime_->bind_input_sink([this](SessionInput input) { post(std::move(input)); });
+      runtime_->bind_actor(weak_from_this());
     }
     worker_ = std::thread([this] { run(); });
   }
@@ -153,5 +158,11 @@ private:
   mutable std::mutex snapshot_mutex_;
   SessionModel snapshot_;
 };
+
+inline void SessionRuntime::post(SessionInput input) {
+  if (auto actor = actor_.lock()) {
+    actor->post(std::move(input));
+  }
+}
 
 } // namespace wolf::session

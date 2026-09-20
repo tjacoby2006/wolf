@@ -175,28 +175,29 @@ TEST_CASE("idr and device hotplug emit effects without changing state", "[sessio
 
 TEST_CASE("actor drives the machine on its own thread", "[session]") {
   auto runtime = std::make_shared<RecordingRuntime>();
-  SessionActor actor(new_session(42), runtime);
-  actor.start();
+  // The actor must be owned by a shared_ptr: it hands the runtime a weak reference to itself.
+  auto actor = std::make_shared<SessionActor>(new_session(42), runtime);
+  actor->start();
 
-  actor.post(GpuAssigned{.render_node = "/dev/dri/renderD128"});
-  actor.post(DesktopReady{.wayland_socket_name = "wayland-1"});
-  actor.post(RunnerStarted{});
-  actor.post(RtpPingReceived{.client_ip = "10.0.0.2", .client_port = 48000});
+  actor->post(GpuAssigned{.render_node = "/dev/dri/renderD128"});
+  actor->post(DesktopReady{.wayland_socket_name = "wayland-1"});
+  actor->post(RunnerStarted{});
+  actor->post(RtpPingReceived{.client_ip = "10.0.0.2", .client_port = 48000});
   // Wait for the actor to catch up.
-  for (int i = 0; i < 100 && actor.snapshot().state != SessionState::Streaming; ++i) {
+  for (int i = 0; i < 100 && actor->snapshot().state != SessionState::Streaming; ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  REQUIRE(actor.snapshot().state == SessionState::Streaming);
+  REQUIRE(actor->snapshot().state == SessionState::Streaming);
 
-  actor.post(StopRequested{.reason = "done"});
+  actor->post(StopRequested{.reason = "done"});
   // The runtime performs the teardown and reports back when it is done.
-  actor.post(TeardownComplete{});
-  for (int i = 0; i < 100 && actor.snapshot().state != SessionState::Stopped; ++i) {
+  actor->post(TeardownComplete{});
+  for (int i = 0; i < 100 && actor->snapshot().state != SessionState::Stopped; ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  REQUIRE(actor.snapshot().state == SessionState::Stopped);
+  REQUIRE(actor->snapshot().state == SessionState::Stopped);
 
-  actor.stop();
+  actor->stop();
   REQUIRE(has<StartDesktop>(runtime->effects));
   REQUIRE(has<StartRunner>(runtime->effects));
   REQUIRE(has<StartStreaming>(runtime->effects));
@@ -207,21 +208,21 @@ TEST_CASE("runtime feedback drives the session to completion", "[session]") {
   // The runtime reacts to each effect by posting the matching input, so the actor should walk the
   // whole lifecycle without any external input beyond the initial GPU assignment.
   auto runtime = std::make_shared<AutoPilotRuntime>();
-  SessionActor actor(new_session(7), runtime);
-  actor.start();
+  auto actor = std::make_shared<SessionActor>(new_session(7), runtime);
+  actor->start();
 
-  actor.post(StartSession{});
+  actor->post(StartSession{});
 
-  for (int i = 0; i < 100 && actor.snapshot().state != SessionState::RunnerRunning; ++i) {
+  for (int i = 0; i < 100 && actor->snapshot().state != SessionState::RunnerRunning; ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  REQUIRE(actor.snapshot().state == SessionState::RunnerRunning);
+  REQUIRE(actor->snapshot().state == SessionState::RunnerRunning);
 
-  actor.post(StopRequested{.reason = "done"});
-  for (int i = 0; i < 100 && actor.snapshot().state != SessionState::Stopped; ++i) {
+  actor->post(StopRequested{.reason = "done"});
+  for (int i = 0; i < 100 && actor->snapshot().state != SessionState::Stopped; ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  REQUIRE(actor.snapshot().state == SessionState::Stopped);
+  REQUIRE(actor->snapshot().state == SessionState::Stopped);
 
-  actor.stop();
+  actor->stop();
 }

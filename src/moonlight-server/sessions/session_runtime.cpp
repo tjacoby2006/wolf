@@ -157,8 +157,10 @@ void MoonlightSessionRuntime::start_desktop(std::uint64_t session_id, const std:
   auto display_mode = session->display_mode;
   auto buffer_caps = session->app->video_producer_buffer_caps;
 
-  // The compositor startup blocks, so run it off the actor's thread.
-  std::thread([this, session, session_id, render_node, buffer_caps, display_mode, gst_contexts, on_ready, event_bus, runtime_dir]() {
+  // The compositor startup blocks, so run it off the actor's thread. The thread holds a shared_ptr
+  // to this runtime so it stays alive even if the actor (and its owning session) is torn down
+  // first; `post()` then safely drops the completion.
+  std::thread([self = shared_from_this(), session, session_id, render_node, buffer_caps, display_mode, gst_contexts, on_ready, event_bus, runtime_dir]() {
     streaming::start_video_producer(std::to_string(session_id),
                                     buffer_caps,
                                     render_node,
@@ -179,10 +181,10 @@ void MoonlightSessionRuntime::start_desktop(std::uint64_t session_id, const std:
     session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
 
     if (!wait_for_wayland_socket(runtime_dir, ready.wayland_socket_name)) {
-      post(DesktopFailed{.reason = "wayland socket was not ready"});
+      self->post(DesktopFailed{.reason = "wayland socket was not ready"});
       return;
     }
-    post(DesktopReady{.wayland_socket_name = ready.wayland_socket_name});
+    self->post(DesktopReady{.wayland_socket_name = ready.wayland_socket_name});
   }).detach();
 }
 
@@ -218,9 +220,10 @@ void MoonlightSessionRuntime::start_runner(std::uint64_t session_id, const std::
     return;
   }
 
-  // The runner blocks for the container's lifetime, so run it off the actor's thread.
-  std::thread([this, session, app_state, audio_server, runtime_dir, session_id, render_node, devices_q]() {
-    post(RunnerStarted{});
+  // The runner blocks for the container's lifetime, so run it off the actor's thread. The thread
+  // holds a shared_ptr to this runtime so it stays alive even if the actor is torn down first.
+  std::thread([self = shared_from_this(), session, app_state, audio_server, runtime_dir, session_id, render_node, devices_q]() {
+    self->post(RunnerStarted{});
 
     // Qualify the free function: the member `start_runner` would otherwise shadow it.
     wolf::core::sessions::start_runner(session->app->runner,
@@ -246,7 +249,7 @@ void MoonlightSessionRuntime::start_runner(std::uint64_t session_id, const std::
                                            .client_settings = session->client_settings}});
 
     // The runner process ended.
-    post(RunnerExited{});
+    self->post(RunnerExited{});
   }).detach();
 }
 
