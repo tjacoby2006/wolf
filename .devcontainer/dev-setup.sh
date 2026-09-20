@@ -18,8 +18,13 @@ mkdir -p nvtop/build && cd nvtop/build
 CXX=/usr/bin/clang++ cmake .. -DNVIDIA_SUPPORT=ON -DAMDGPU_SUPPORT=ON -DINTEL_SUPPORT=ON
 cmake --build . --target install --config Release
 
-# Setup nvidia
-bash /etc/cont-init.d/30-nvidia.sh
+# Setup nvidia (only if an NVIDIA GPU is actually present; on AMD/Intel/WSL hosts
+# this script is absent or fails, which must not abort the dev container setup)
+if [ -f /etc/cont-init.d/30-nvidia.sh ]; then
+    bash /etc/cont-init.d/30-nvidia.sh || echo "WARN: nvidia setup skipped/failed (no NVIDIA GPU?)"
+else
+    echo "INFO: no NVIDIA setup script found, skipping"
+fi
 
 # Create base wolf cfg folder
 mkdir -p $WOLF_CFG_FOLDER

@@ -35,14 +35,22 @@
     "/dev/:/dev/:rw",
     "--rm",
   ],
-  "hostRequirements": {
-    "gpu": true
-  },
+  // NOTE: `hostRequirements.gpu: true` makes the Dev Containers extension pass `--gpus all`,
+  // which selects the `nvidia` runtime. On a host without an NVIDIA GPU (AMD/Intel, or WSL2
+  // with no NVIDIA adapter) its prestart hook aborts container creation with:
+  //   nvidia-container-cli: initialization error: WSL environment detected but no adapters
+  //   were found
+  // Re-enable this only on an NVIDIA host.
+  // "hostRequirements": {
+  //   "gpu": true
+  // },
   "privileged": true,
-  "containerEnv": {
-    "NVIDIA_DRIVER_CAPABILITIES": "all",
-    "NVIDIA_VISIBLE_DEVICES": "all"
-  },
+  // NOTE: Do NOT set NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES here unless the
+  // host actually has an NVIDIA GPU. Uncomment the block below only on an NVIDIA host.
+  // "containerEnv": {
+  //   "NVIDIA_DRIVER_CAPABILITIES": "all",
+  //   "NVIDIA_VISIBLE_DEVICES": "all"
+  // },
   "remoteEnv": {
     "XDG_RUNTIME_DIR": "/tmp/sockets",
     "WOLF_LOG_LEVEL": "DEBUG",
