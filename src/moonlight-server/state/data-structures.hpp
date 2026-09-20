@@ -20,6 +20,7 @@
 #include <moonlight/data-structures.hpp>
 #include <openssl/x509.h>
 #include <optional>
+#include <session/session_actor.hpp>
 #include <state/gpu_balancer.hpp>
 #include <state/serialised_config.hpp>
 #include <utility>
@@ -202,6 +203,17 @@ struct AppState {
    * Apps acquire a node when they start and release it when they stop.
    */
   std::shared_ptr<immer::atom<GpuBalancer>> gpu_balancer = std::make_shared<immer::atom<GpuBalancer>>(GpuBalancer{});
+
+  /**
+   * Live session actors, keyed by session id.
+   *
+   * Each actor owns one session's lifecycle (see src/session/). Protocol adapters look up the
+   * actor here and post inputs to it, so the session has a single owner instead of being mutated
+   * from many event-bus handlers.
+   */
+  std::shared_ptr<immer::atom<immer::map<std::uint64_t, std::shared_ptr<wolf::session::SessionActor>>>>
+      session_actors =
+          std::make_shared<immer::atom<immer::map<std::uint64_t, std::shared_ptr<wolf::session::SessionActor>>>>();
 };
 
 const static immer::array<audio::AudioMode> AUDIO_CONFIGURATIONS = {

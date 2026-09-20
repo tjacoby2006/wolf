@@ -33,10 +33,13 @@ void MoonlightSessionRuntime::execute(const SessionEffect &effect) {
         } else if constexpr (std::is_same_v<T, ReleaseGpu>) {
           release_gpu(e.session_id);
         } else {
-          // PauseStreaming / ResumeStreaming / RequestIdr / PlugDevice / UnplugDevice are handled
-          // by the streaming pipelines' own event-bus handlers for now; the actor still owns the
-          // lifecycle, these are just forwarded.
-          logs::log(logs::debug, "[SESSION] Effect {} not yet wired to the runtime", typeid(T).name());
+          // PauseStreaming / ResumeStreaming / RequestIdr / PlugDevice / UnplugDevice are part of
+          // the state machine's vocabulary but are not yet driven by any input: stream control
+          // (pause/resume/IDR) and device hotplug still go straight through the event bus, where
+          // the streaming pipelines and the Docker runner consume them. The actor owns the
+          // startup/teardown lifecycle; these remain bus-driven until they are routed through the
+          // actor too.
+          logs::log(logs::debug, "[SESSION] Effect {} is not yet driven by the actor", typeid(T).name());
         }
       },
       effect);

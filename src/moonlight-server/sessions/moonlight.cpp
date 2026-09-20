@@ -13,9 +13,6 @@ namespace wolf::core::sessions {
 
 using session_devices = immer::map<std::string /* session_id */, std::shared_ptr<events::devices_atom_queue>>;
 
-/** Live session actors, keyed by session id. Keeps them alive for the session's lifetime. */
-using active_actor_map = immer::map<std::uint64_t, std::shared_ptr<wolf::session::SessionActor>>;
-
 /**
  * Will stop the execution until an event of type RTPPingType is triggered
  * and the signature is matching the input `sess`.
@@ -62,7 +59,7 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
    */
   auto plugged_devices_queue = std::make_shared<immer::atom<session_devices>>();
   auto gpu_balancer = app_state->gpu_balancer;
-  auto active_actors = std::make_shared<immer::atom<active_actor_map>>();
+  auto active_actors = app_state->session_actors;
 
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StopStreamEvent>>(
       [&app_state, plugged_devices_queue, gpu_balancer, active_actors](const immer::box<events::StopStreamEvent> &ev) {
@@ -70,7 +67,7 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         // device queue cleanup) and will run it as part of its state machine.
         if (auto actor = active_actors->load()->find(ev->session_id)) {
           (*actor)->post(wolf::session::StopRequested{.reason = "stop stream event"});
-          active_actors->update([id = ev->session_id](const active_actor_map &actors) { return actors.erase(id); });
+          active_actors->update([id = ev->session_id](const auto &actors) { return actors.erase(id); });
           return;
         }
 
