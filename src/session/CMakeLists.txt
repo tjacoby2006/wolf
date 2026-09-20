@@ -9,8 +9,13 @@ target_link_libraries(wolf_session PUBLIC wolf::helpers)
 target_sources(wolf_session
         PRIVATE
         session_machine.cpp
+        lobby_machine.cpp
 
         PUBLIC
+        lobby_effect.hpp
+        lobby_input.hpp
+        lobby_model.hpp
+        lobby_state.hpp
         session_actor.hpp
         session_effect.hpp
         session_input.hpp

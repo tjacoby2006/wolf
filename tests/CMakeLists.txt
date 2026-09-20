@@ -26,7 +26,8 @@ set(SRC_LIST
         testBatchedSend.cpp
         testSession.cpp
         testEncoderPolicy.cpp
-        testPacing.cpp)
+        testPacing.cpp
+        testLobby.cpp)
 
 option(TEST_RUST_WAYLAND "Test our custom Rust wayland compositor" ON)
 if (UNIX AND NOT APPLE)
