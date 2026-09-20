@@ -19,6 +19,9 @@ namespace wolf::session {
  * scattered handlers mutate shared `immer` atoms.
  */
 
+/** Kick off the session lifecycle: pick a GPU and start the desktop. */
+struct StartSession {};
+
 /** A GPU/render node has been selected for this session. */
 struct GpuAssigned {
   std::string render_node;
@@ -78,7 +81,8 @@ struct TeardownComplete {};
 /** A periodic tick, used to drive timeouts (e.g. waiting for the RTP ping). */
 struct Tick {};
 
-using SessionInput = std::variant<GpuAssigned,
+using SessionInput = std::variant<StartSession,
+                                  GpuAssigned,
                                   DesktopReady,
                                   DesktopFailed,
                                   RunnerStarted,

@@ -59,6 +59,10 @@ Transition step(const SessionModel &model, const SessionInput &input) {
 
   switch (model.state) {
   case SessionState::Created:
+    if (std::holds_alternative<StartSession>(input)) {
+      // Ask the runtime to pick a GPU; it replies with `GpuAssigned`.
+      return effect_only(model, AssignGpu{.session_id = model.session_id});
+    }
     if (std::holds_alternative<GpuAssigned>(input)) {
       auto next = model;
       next.state = SessionState::DesktopStarting;

@@ -5,11 +5,16 @@
 #include <string>
 
 #include <events/events.hpp>
+#include <immer/atom.hpp>
+#include <immer/map.hpp>
 #include <session/session_actor.hpp>
 #include <sessions/handlers.hpp>
 #include <state/data-structures.hpp>
 
 namespace wolf::core::sessions {
+
+/** Per-session queue of devices waiting to be plugged into the runner. */
+using session_devices = immer::map<std::string /* session_id */, std::shared_ptr<events::devices_atom_queue>>;
 
 /**
  * Everything the runtime needs to bring a session up and tear it down.
@@ -23,6 +28,8 @@ struct SessionContext {
   std::shared_ptr<events::StreamSession> stream_session;
   std::string runtime_dir;
   std::optional<AudioServer> audio_server;
+  /** Shared across sessions; the runtime registers/removes this session's device queue here. */
+  std::shared_ptr<immer::atom<session_devices>> plugged_devices_queue;
 };
 
 /**

@@ -62,7 +62,12 @@ template <typename T> bool has(const std::vector<SessionEffect> &effects) {
 TEST_CASE("session walks the happy path in order", "[session]") {
   auto model = new_session();
 
-  auto t = step(model, GpuAssigned{.render_node = "/dev/dri/renderD128"});
+  // Starting the session asks the runtime to pick a GPU.
+  auto t = step(model, StartSession{});
+  REQUIRE(t.model.state == SessionState::Created);
+  REQUIRE(has<AssignGpu>(t.effects));
+
+  t = step(t.model, GpuAssigned{.render_node = "/dev/dri/renderD128"});
   REQUIRE(t.model.state == SessionState::DesktopStarting);
   REQUIRE(t.model.render_node == "/dev/dri/renderD128");
   REQUIRE(has<StartDesktop>(t.effects));
@@ -177,7 +182,6 @@ TEST_CASE("actor drives the machine on its own thread", "[session]") {
   actor.post(DesktopReady{.wayland_socket_name = "wayland-1"});
   actor.post(RunnerStarted{});
   actor.post(RtpPingReceived{.client_ip = "10.0.0.2", .client_port = 48000});
-
   // Wait for the actor to catch up.
   for (int i = 0; i < 100 && actor.snapshot().state != SessionState::Streaming; ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -206,7 +210,7 @@ TEST_CASE("runtime feedback drives the session to completion", "[session]") {
   SessionActor actor(new_session(7), runtime);
   actor.start();
 
-  actor.post(GpuAssigned{.render_node = "/dev/dri/renderD128"});
+  actor.post(StartSession{});
 
   for (int i = 0; i < 100 && actor.snapshot().state != SessionState::RunnerRunning; ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));

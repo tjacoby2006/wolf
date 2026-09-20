@@ -2,14 +2,19 @@
 #include <immer/array_transient.hpp>
 #include <immer/map_transient.hpp>
 #include <immer/vector_transient.hpp>
+#include <session/session_actor.hpp>
 #include <sessions/common.hpp>
 #include <sessions/handlers.hpp>
+#include <sessions/session_runtime.hpp>
 #include <state/sessions.hpp>
 #include <streaming/streaming.hpp>
 
 namespace wolf::core::sessions {
 
 using session_devices = immer::map<std::string /* session_id */, std::shared_ptr<events::devices_atom_queue>>;
+
+/** Live session actors, keyed by session id. Keeps them alive for the session's lifetime. */
+using active_actor_map = immer::map<std::uint64_t, std::shared_ptr<wolf::session::SessionActor>>;
 
 /**
  * Will stop the execution until an event of type RTPPingType is triggered
@@ -57,10 +62,20 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
    */
   auto plugged_devices_queue = std::make_shared<immer::atom<session_devices>>();
   auto gpu_balancer = app_state->gpu_balancer;
+  auto active_actors = std::make_shared<immer::atom<active_actor_map>>();
 
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StopStreamEvent>>(
-      [&app_state, plugged_devices_queue, gpu_balancer](const immer::box<events::StopStreamEvent> &ev) {
-        // Release the GPU assigned to this session so it can be reused by the next app
+      [&app_state, plugged_devices_queue, gpu_balancer, active_actors](const immer::box<events::StopStreamEvent> &ev) {
+        // Ask the session's actor to stop; it owns the teardown (GPU release, session removal,
+        // device queue cleanup) and will run it as part of its state machine.
+        if (auto actor = active_actors->load()->find(ev->session_id)) {
+          (*actor)->post(wolf::session::StopRequested{.reason = "stop stream event"});
+          active_actors->update([id = ev->session_id](const active_actor_map &actors) { return actors.erase(id); });
+          return;
+        }
+
+        // No actor (e.g. a session that never got one): fall back to the legacy cleanup so we
+        // never leak a GPU assignment or a stale session entry.
         if (auto session = state::get_session_by_id(app_state->running_sessions->load().get(), ev->session_id)) {
           auto node = session->assigned_render_node;
           if (!node.empty()) {
@@ -68,8 +83,6 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           }
         }
 
-        // Remove session from app state so that HTTP/S applist gets updated
-        // This should effectively destroy the virtual Wayland session since it holds the last reference
         app_state->running_sessions->update([&ev](const immer::vector<events::StreamSession> &ses_v) {
           return state::remove_session(ses_v, {.session_id = ev->session_id});
         });
@@ -94,213 +107,36 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         }
       }));
 
-  // Run process and our custom wayland as soon as a new StreamSession is created
+  // A new StreamSession is created: hand it to a SessionActor, which owns the whole lifecycle.
+  // The actor drives GPU assignment, compositor startup, the runner and teardown as one linear
+  // state machine (see src/session/), instead of the old web of detached handlers.
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StreamSession>>(
-      [&app_state, plugged_devices_queue, gpu_balancer, runtime_dir, audio_server](const immer::box<events::StreamSession> &session) {
-        /* Assign a GPU to this session (pinned if the app requests one, otherwise load-balanced) */
-        {
-          std::string usage_str;
-          for (const auto &[node, count] : gpu_balancer->load()->usage) {
-            if (!usage_str.empty())
-              usage_str += ", ";
-            usage_str += node + "=" + std::to_string(count);
-          }
-          logs::log(logs::info,
-                    "[STREAM_SESSION] GPU balancer before pick (session {}): {}",
-                    session->session_id,
-                    usage_str.empty() ? "(none)" : usage_str);
-        }
-        auto chosen = gpu_balancer->load()->pick(session->app->gpu_pin);
-        logs::log(logs::info,
-                  "[STREAM_SESSION] Picked GPU {} for session {} (pin={})",
-                  chosen.has_value() ? *chosen : "<none>",
-                  session->session_id,
-                  session->app->gpu_pin.has_value() ? *session->app->gpu_pin : "<none>");
-        // The pool is discovered at startup and can go stale (GPU reset, driver reload, ...).
-        // Handing a dead node to the virtual compositor makes it panic and abort Wolf, so probe first.
-        if (chosen.has_value() && !is_render_node_available(*chosen)) {
-          logs::log(logs::error, "[STREAM_SESSION] Assigned GPU {} is not available for session {}", *chosen, session->session_id);
-          gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.release(node); });
-          chosen.reset();
-        }
-        if (!chosen.has_value()) {
-          logs::log(logs::error, "[STREAM_SESSION] No available GPU for session {}", session->session_id);
-          auto ev_bus = session->event_bus;
-          auto sid = session->session_id;
-          std::thread([ev_bus, sid]() {
-            ev_bus->fire_event(immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = sid}));
-          }).detach();
-          return;
-        }
-        app_state->running_sessions->update([node = *chosen, id = session->session_id](const immer::vector<events::StreamSession> &ses_v) {
-          auto v = ses_v.transient();
-          for (size_t i = 0; i < v.size(); ++i) {
-            if (v[i].session_id == id) {
-              auto updated = v[i];
-              updated.assigned_render_node = node;
-              v.set(i, updated);
-            }
-          }
-          return v.persistent();
+      [&app_state, plugged_devices_queue, runtime_dir, audio_server, active_actors](const immer::box<events::StreamSession> &session) {
+        auto stream_session = std::make_shared<events::StreamSession>(*session);
+
+        wolf::session::SessionModel model;
+        model.session_id = stream_session->session_id;
+        model.width = stream_session->display_mode.width;
+        model.height = stream_session->display_mode.height;
+        model.refresh_rate = stream_session->display_mode.refreshRate;
+
+        auto context = SessionContext{.app_state = app_state,
+                                      .stream_session = stream_session,
+                                      .runtime_dir = runtime_dir,
+                                      .audio_server = audio_server,
+                                      .plugged_devices_queue = plugged_devices_queue};
+        auto runtime = std::make_shared<MoonlightSessionRuntime>(std::move(context));
+
+        auto actor = std::make_shared<wolf::session::SessionActor>(std::move(model), runtime);
+        actor->start();
+
+        // Kick off the lifecycle. The runtime feeds the rest of the inputs back as effects complete.
+        actor->post(wolf::session::StartSession{});
+
+        // Keep the actor alive for the session's lifetime; it stops itself on a terminal state.
+        active_actors->update([id = stream_session->session_id, actor](const auto &actors) {
+          return actors.set(id, actor);
         });
-        gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.acquire(node); });
-
-        /* Initialise plugged device queue */
-        auto devices_q = std::make_shared<events::devices_atom_queue>();
-        plugged_devices_queue->update(
-            [=](const session_devices map) { return map.set(std::to_string(session->session_id), devices_q); });
-
-        std::shared_ptr<boost::promise<streaming::WaylandDisplayReady>> on_ready =
-            std::make_shared<boost::promise<streaming::WaylandDisplayReady>>();
-
-        if (session->app->start_virtual_compositor) {
-          logs::log(logs::debug, "[STREAM_SESSION] Create wayland compositor");
-
-          // Start Gstreamer producer pipeline.
-          // NOTE: `session` is an immutable snapshot, so its `assigned_render_node` is still empty here
-          // (we only wrote the chosen node into `running_sessions` above). Use the freshly picked node
-          // directly, otherwise the compositor would fall back to the app's default render node and
-          // diverge from the runner's GPU (leading to CUDA_ERROR_INVALID_DEVICE).
-          std::thread([session, chosen_node = *chosen, on_ready, gst_contexts = app_state->gst_contexts]() {
-            streaming::start_video_producer(std::to_string(session->session_id),
-                                            session->app->video_producer_buffer_caps,
-                                            chosen_node,
-                                            {.width = session->display_mode.width,
-                                             .height = session->display_mode.height,
-                                             .refreshRate = session->display_mode.refreshRate},
-                                            gst_contexts,
-                                            on_ready,
-                                            session->event_bus);
-          }).detach();
-        } else {
-          // Create virtual devices
-          auto mouse = input::Mouse::create();
-          if (!mouse) {
-            logs::log(logs::error, "Failed to create mouse: {}", mouse.getErrorMessage());
-          } else {
-            auto mouse_ptr = input::Mouse(std::move(*mouse));
-            devices_q->push(immer::box<events::PlugDeviceEvent>(
-                events::PlugDeviceEvent{.session_id = std::to_string(session->session_id),
-                                        .udev_events = mouse_ptr.get_udev_events(),
-                                        .udev_hw_db_entries = mouse_ptr.get_udev_hw_db_entries()}));
-            session->mouse->emplace(std::move(mouse_ptr));
-          }
-
-          auto keyboard = input::Keyboard::create();
-          if (!keyboard) {
-            logs::log(logs::error, "Failed to create keyboard: {}", keyboard.getErrorMessage());
-          } else {
-            auto keyboard_ptr = input::Keyboard(std::move(*keyboard));
-            devices_q->push(immer::box<events::PlugDeviceEvent>(
-                events::PlugDeviceEvent{.session_id = std::to_string(session->session_id),
-                                        .udev_events = keyboard_ptr.get_udev_events(),
-                                        .udev_hw_db_entries = keyboard_ptr.get_udev_hw_db_entries()}));
-            session->keyboard->emplace(std::move(keyboard_ptr));
-          }
-          on_ready->set_value({});
-        }
-
-        /* Create audio virtual sink */
-        logs::log(logs::debug, "[STREAM_SESSION] Create virtual audio sink");
-        auto pulse_sink_name = fmt::format("{}{}", VIRTUAL_SINK_PREFIX, session->session_id);
-        std::shared_ptr<audio::VSink> v_device;
-        if (session->app->start_audio_server && audio_server && audio_server->server) {
-          v_device = audio::create_virtual_sink(
-              audio_server->server,
-              audio::AudioDevice{.sink_name = pulse_sink_name,
-                                 .mode = state::get_audio_mode(session->audio_channel_count, true)});
-          session->audio_sink->store(v_device);
-
-          std::thread([session, audio_server = audio_server->server]() {
-            auto sink_name = fmt::format("{}{}.monitor", VIRTUAL_SINK_PREFIX, session->session_id);
-            streaming::start_audio_producer(std::to_string(session->session_id),
-                                            session->event_bus,
-                                            session->audio_channel_count,
-                                            sink_name,
-                                            audio::get_server_name(audio_server));
-          }).detach();
-        }
-
-        // TODO: timeout? What if the wayland display is never ready?
-        auto w_display_ready = on_ready->get_future().then([session, chosen_node = *chosen, runtime_dir](auto fut) {
-          streaming::WaylandDisplayReady ready = fut.get();
-
-          auto wl_state = virtual_display::create_wayland_display(ready.wayland_plugin, ready.wayland_socket_name);
-          // Set the wayland display
-          session->wayland_display->store(wl_state);
-
-          // Set virtual devices
-          session->mouse->emplace(virtual_display::WaylandMouse(wl_state));
-          session->keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
-          session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
-
-          if (!wait_for_wayland_socket(runtime_dir, ready.wayland_socket_name)) {
-            logs::log(logs::error,
-                      "[STREAM_SESSION] Wayland socket {} was not ready, aborting runner startup",
-                      ready.wayland_socket_name);
-            session->event_bus->fire_event(
-                immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session->session_id}));
-            return;
-          }
-
-          logs::log(logs::debug, "[STREAM_SESSION] Start runner");
-          // `session` is an immutable snapshot whose `assigned_render_node` is still empty; carry the
-          // freshly picked node so the runner uses the same GPU as the compositor.
-          auto runner_session = std::make_shared<events::StreamSession>(*session);
-          runner_session->assigned_render_node = chosen_node;
-          session->event_bus->fire_event(immer::box<events::StartRunner>(
-              events::StartRunner{.stop_stream_when_over = true,
-                                  .runner = session->app->runner,
-                                  .stream_session = std::move(runner_session)}));
-        });
-      }));
-
-  /* Start runner */
-  handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StartRunner>>(
-      [=](const immer::box<events::StartRunner> &run_session) {
-        auto session_id = std::to_string(run_session->stream_session->session_id);
-        auto devices_q = plugged_devices_queue->load()->find(session_id);
-        if (!devices_q) {
-          logs::log(logs::warning, "No devices queue found for session {}", session_id);
-          return;
-        }
-
-        std::thread([=]() {
-          start_runner(
-              run_session->runner,
-              *devices_q,
-              immer::box<RunnerArgs>{RunnerArgs{
-                  .session_id = session_id,
-                  .video_settings =
-                      {
-                          .width = run_session->stream_session->display_mode.width,
-                          .height = run_session->stream_session->display_mode.height,
-                          .refresh_rate = run_session->stream_session->display_mode.refreshRate,
-                          .wayland_render_node = run_session->stream_session->assigned_render_node.empty()
-                                                      ? run_session->stream_session->app->render_node
-                                                      : run_session->stream_session->assigned_render_node,
-                          .runner_render_node = run_session->stream_session->assigned_render_node.empty()
-                                                     ? run_session->stream_session->app->render_node
-                                                     : run_session->stream_session->assigned_render_node,
-                          .video_producer_buffer_caps = run_session->stream_session->app->video_producer_buffer_caps,
-                      },
-                  .wayland_display = run_session->stream_session->wayland_display->load(),
-                  .audio_server = audio_server,
-                  .audio_sink = run_session->stream_session->audio_sink->load(),
-                  .host = app_state->host,
-                  .app_local_state_folder = run_session->stream_session->app_local_state_folder,
-                  .app_host_state_folder = run_session->stream_session->app_host_state_folder,
-                  .xdg_runtime_dir = runtime_dir,
-                  .client_settings = run_session->stream_session->client_settings}});
-
-          // Runner process ended
-          if (run_session->stop_stream_when_over) {
-            run_session->stream_session->wayland_display->store(nullptr);
-
-            app_state->event_bus->fire_event(immer::box<events::StopStreamEvent>(
-                events::StopStreamEvent{.session_id = run_session->stream_session->session_id}));
-          }
-        }).detach();
       }));
 
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::VideoSession>>(

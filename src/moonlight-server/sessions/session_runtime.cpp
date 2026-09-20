@@ -1,6 +1,10 @@
 #include <sessions/session_runtime.hpp>
 
+#include <core/audio.hpp>
+#include <core/input.hpp>
+#include <core/virtual-display.hpp>
 #include <helpers/logger.hpp>
+#include <immer/vector_transient.hpp>
 #include <platforms/hw.hpp>
 #include <sessions/common.hpp>
 #include <state/sessions.hpp>
@@ -63,6 +67,21 @@ void MoonlightSessionRuntime::assign_gpu(std::uint64_t session_id) {
     return;
   }
 
+  // Record the assignment on the session so the runner and teardown can see it.
+  session->assigned_render_node = *chosen;
+  context_.app_state->running_sessions->update(
+      [node = *chosen, id = session_id](const immer::vector<events::StreamSession> &sessions) {
+        auto v = sessions.transient();
+        for (std::size_t i = 0; i < v.size(); ++i) {
+          if (v[i].session_id == id) {
+            auto updated = v[i];
+            updated.assigned_render_node = node;
+            v.set(i, updated);
+          }
+        }
+        return v.persistent();
+      });
+
   gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.acquire(node); });
   post(GpuAssigned{.render_node = *chosen});
 }
@@ -70,8 +89,36 @@ void MoonlightSessionRuntime::assign_gpu(std::uint64_t session_id) {
 void MoonlightSessionRuntime::start_desktop(std::uint64_t session_id, const std::string &render_node) {
   auto session = context_.stream_session;
 
+  // Register this session's device queue so hotplug events have somewhere to go.
+  auto devices_q = std::make_shared<events::devices_atom_queue>();
+  context_.plugged_devices_queue->update(
+      [id = std::to_string(session_id), devices_q](const session_devices map) { return map.set(id, devices_q); });
+
   if (!session->app->start_virtual_compositor) {
-    // No compositor: the desktop is trivially "ready" (virtual devices are created elsewhere).
+    // No compositor: create the virtual input devices directly and report the desktop ready.
+    auto mouse = input::Mouse::create();
+    if (!mouse) {
+      logs::log(logs::error, "Failed to create mouse: {}", mouse.getErrorMessage());
+    } else {
+      auto mouse_ptr = input::Mouse(std::move(*mouse));
+      devices_q->push(immer::box<events::PlugDeviceEvent>(
+          events::PlugDeviceEvent{.session_id = std::to_string(session_id),
+                                  .udev_events = mouse_ptr.get_udev_events(),
+                                  .udev_hw_db_entries = mouse_ptr.get_udev_hw_db_entries()}));
+      session->mouse->emplace(std::move(mouse_ptr));
+    }
+
+    auto keyboard = input::Keyboard::create();
+    if (!keyboard) {
+      logs::log(logs::error, "Failed to create keyboard: {}", keyboard.getErrorMessage());
+    } else {
+      auto keyboard_ptr = input::Keyboard(std::move(*keyboard));
+      devices_q->push(immer::box<events::PlugDeviceEvent>(
+          events::PlugDeviceEvent{.session_id = std::to_string(session_id),
+                                  .udev_events = keyboard_ptr.get_udev_events(),
+                                  .udev_hw_db_entries = keyboard_ptr.get_udev_hw_db_entries()}));
+      session->keyboard->emplace(std::move(keyboard_ptr));
+    }
     post(DesktopReady{.wayland_socket_name = ""});
     return;
   }
@@ -84,7 +131,7 @@ void MoonlightSessionRuntime::start_desktop(std::uint64_t session_id, const std:
   auto buffer_caps = session->app->video_producer_buffer_caps;
 
   // The compositor startup blocks, so run it off the actor's thread.
-  std::thread([this, session_id, render_node, buffer_caps, display_mode, gst_contexts, on_ready, event_bus, runtime_dir]() {
+  std::thread([this, session, session_id, render_node, buffer_caps, display_mode, gst_contexts, on_ready, event_bus, runtime_dir]() {
     streaming::start_video_producer(std::to_string(session_id),
                                     buffer_caps,
                                     render_node,
@@ -96,6 +143,14 @@ void MoonlightSessionRuntime::start_desktop(std::uint64_t session_id, const std:
                                     event_bus);
 
     auto ready = on_ready->get_future().get();
+
+    // Wire the compositor up as the session's virtual display and input devices.
+    auto wl_state = virtual_display::create_wayland_display(ready.wayland_plugin, ready.wayland_socket_name);
+    session->wayland_display->store(wl_state);
+    session->mouse->emplace(virtual_display::WaylandMouse(wl_state));
+    session->keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
+    session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
+
     if (!wait_for_wayland_socket(runtime_dir, ready.wayland_socket_name)) {
       post(DesktopFailed{.reason = "wayland socket was not ready"});
       return;
@@ -110,33 +165,58 @@ void MoonlightSessionRuntime::start_runner(std::uint64_t session_id, const std::
   auto audio_server = context_.audio_server;
   auto runtime_dir = context_.runtime_dir;
 
+  // Create the audio virtual sink and start the audio producer before the runner comes up.
+  if (session->app->start_audio_server && audio_server && audio_server->server) {
+    auto pulse_sink_name = fmt::format("{}{}", VIRTUAL_SINK_PREFIX, session_id);
+    auto v_device = audio::create_virtual_sink(
+        audio_server->server,
+        audio::AudioDevice{.sink_name = pulse_sink_name,
+                           .mode = state::get_audio_mode(session->audio_channel_count, true)});
+    session->audio_sink->store(v_device);
+
+    std::thread([session, audio_server = audio_server->server, session_id]() {
+      auto sink_name = fmt::format("{}{}.monitor", VIRTUAL_SINK_PREFIX, session_id);
+      streaming::start_audio_producer(std::to_string(session_id),
+                                      session->event_bus,
+                                      session->audio_channel_count,
+                                      sink_name,
+                                      audio::get_server_name(audio_server));
+    }).detach();
+  }
+
+  auto devices_q = context_.plugged_devices_queue->load()->find(std::to_string(session_id));
+  if (!devices_q) {
+    logs::log(logs::warning, "[SESSION] No devices queue found for session {}", session_id);
+    post(StopRequested{.reason = "no devices queue"});
+    return;
+  }
+
   // The runner blocks for the container's lifetime, so run it off the actor's thread.
-  std::thread([this, session, app_state, audio_server, runtime_dir, session_id, render_node]() {
-    auto devices_q = std::make_shared<events::devices_atom_queue>();
+  std::thread([this, session, app_state, audio_server, runtime_dir, session_id, render_node, devices_q]() {
     post(RunnerStarted{});
 
     // Qualify the free function: the member `start_runner` would otherwise shadow it.
     wolf::core::sessions::start_runner(session->app->runner,
-                                       devices_q,
+                                       *devices_q,
                                        immer::box<RunnerArgs>{RunnerArgs{
-                     .session_id = std::to_string(session_id),
-                     .video_settings =
-                         {
-                             .width = session->display_mode.width,
-                             .height = session->display_mode.height,
-                             .refresh_rate = session->display_mode.refreshRate,
-                             .wayland_render_node = render_node,
-                             .runner_render_node = render_node,
-                             .video_producer_buffer_caps = session->app->video_producer_buffer_caps,
-                         },
-                     .wayland_display = session->wayland_display->load(),
-                     .audio_server = audio_server,
-                     .audio_sink = session->audio_sink->load(),
-                     .host = app_state->host,
-                     .app_local_state_folder = session->app_local_state_folder,
-                     .app_host_state_folder = session->app_host_state_folder,
-                     .xdg_runtime_dir = runtime_dir,
-                     .client_settings = session->client_settings}});
+                                           .session_id = std::to_string(session_id),
+                                           .video_settings =
+                                               {
+                                                   .width = session->display_mode.width,
+                                                   .height = session->display_mode.height,
+                                                   .refresh_rate = session->display_mode.refreshRate,
+                                                   .wayland_render_node = render_node,
+                                                   .runner_render_node = render_node,
+                                                   .video_producer_buffer_caps = session->app->video_producer_buffer_caps,
+                                               },
+                                           .wayland_display = session->wayland_display->load(),
+                                           .audio_server = audio_server,
+                                           .audio_sink = session->audio_sink->load(),
+                                           .host = app_state->host,
+                                           .app_local_state_folder = session->app_local_state_folder,
+                                           .app_host_state_folder = session->app_host_state_folder,
+                                           .xdg_runtime_dir = runtime_dir,
+                                           .client_settings = session->client_settings}});
 
     // The runner process ended.
     post(RunnerExited{});
@@ -164,6 +244,10 @@ void MoonlightSessionRuntime::teardown(std::uint64_t session_id, const std::stri
   app_state->running_sessions->update([session_id](const immer::vector<events::StreamSession> &sessions) {
     return state::remove_session(sessions, {.session_id = session_id});
   });
+
+  // Drop this session's device queue.
+  context_.plugged_devices_queue->update(
+      [id = std::to_string(session_id)](const session_devices map) { return map.erase(id); });
 
   post(TeardownComplete{});
 }
