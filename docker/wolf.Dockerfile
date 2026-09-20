@@ -1,3 +1,7 @@
+# check=skip=SecretsUsedInArgOrEnv
+# The WOLF_PRIVATE_KEY_FILE / WOLF_PRIVATE_CERT_FILE env vars below hold *paths* to the key and
+# certificate files, not the secrets themselves, so the SecretsUsedInArgOrEnv check is a false
+# positive here.
 ARG BASE_IMAGE=ghcr.io/games-on-whales/gstreamer:1.26.7
 ########################################################
 FROM $BASE_IMAGE AS wolf-builder
