@@ -88,12 +88,15 @@ LobbyTransition step_lobby(const LobbyModel &model, const LobbyInput &input) {
       return effect_only(model, AssignLobbyGpu{.lobby_id = model.lobby_id});
     }
     if (std::holds_alternative<LobbyGpuAssigned>(input)) {
+      // Read the node off the *input* rather than `next`: `next` is moved into `.model` earlier in
+      // the same initializer list, so reading `next.render_node` there would yield "".
+      const auto &render_node = std::get<LobbyGpuAssigned>(input).render_node;
       auto next = model;
       next.state = LobbyState::DesktopStarting;
-      next.render_node = std::get<LobbyGpuAssigned>(input).render_node;
+      next.render_node = render_node;
       return LobbyTransition{.model = std::move(next),
                              .effects = {StartLobbyDesktop{.lobby_id = model.lobby_id,
-                                                           .render_node = next.render_node,
+                                                           .render_node = render_node,
                                                            .width = model.width,
                                                            .height = model.height,
                                                            .refresh_rate = model.refresh_rate}}};

@@ -44,7 +44,19 @@ Transition ignore(const SessionModel &model) {
   return Transition{.model = model, .effects = {}};
 }
 
-/** Emit a single effect without changing state. */
+/**
+ * Emit effects without changing state.
+ *
+ * Beware of reading from `next` in the initializer lists below. `Transition::model` is declared
+ * before `Transition::effects`, and the initializer-clauses of a braced-init-list are evaluated in
+ * declaration order, so `std::move(next)` runs *before* the effects are built. Any field read off
+ * `next` therefore observes a moved-from value: for a `std::string` that is the empty string.
+ *
+ * That is exactly how an empty `render_node` reached the compositor: the effect carried the
+ * moved-from string, the Wayland source was launched with `render_node=` (empty) and
+ * gst-wayland-display aborted with "Failed to open drm node !", then panicked. Always read such
+ * fields off `model` (which is a reference to the original, un-moved object) or off the input.
+ */
 Transition effect_only(const SessionModel &model, SessionEffect effect) {
   return Transition{.model = model, .effects = {std::move(effect)}};
 }
@@ -73,12 +85,15 @@ Transition step(const SessionModel &model, const SessionInput &input) {
       return adopt(model);
     }
     if (std::holds_alternative<GpuAssigned>(input)) {
+      // Read the node off the *input* rather than `next`: `next` is moved into `.model` earlier in
+      // the same initializer list, so reading `next.render_node` there would yield "".
+      const auto &render_node = std::get<GpuAssigned>(input).render_node;
       auto next = model;
       next.state = SessionState::DesktopStarting;
-      next.render_node = std::get<GpuAssigned>(input).render_node;
+      next.render_node = render_node;
       return Transition{.model = std::move(next),
                         .effects = {StartDesktop{.session_id = model.session_id,
-                                                 .render_node = next.render_node,
+                                                 .render_node = render_node,
                                                  .width = model.width,
                                                  .height = model.height,
                                                  .refresh_rate = model.refresh_rate}}};
@@ -90,6 +105,7 @@ Transition step(const SessionModel &model, const SessionInput &input) {
       auto next = model;
       next.state = SessionState::RunnerStarting;
       next.wayland_socket_name = std::get<DesktopReady>(input).wayland_socket_name;
+      // `model.render_node` is untouched by this transition, so it is safe to read after the move.
       return Transition{.model = std::move(next),
                         .effects = {StartRunner{.session_id = model.session_id, .render_node = model.render_node}}};
     }
@@ -105,14 +121,17 @@ Transition step(const SessionModel &model, const SessionInput &input) {
 
   case SessionState::RunnerRunning:
     if (std::holds_alternative<RtpPingReceived>(input)) {
+      // Read the client off the *input*: `next` is moved into `.model` earlier in the same
+      // initializer list, so reading `next.client_ip` there would yield "".
+      const auto &ping = std::get<RtpPingReceived>(input);
       auto next = model;
       next.state = SessionState::Streaming;
-      next.client_ip = std::get<RtpPingReceived>(input).client_ip;
-      next.client_port = std::get<RtpPingReceived>(input).client_port;
+      next.client_ip = ping.client_ip;
+      next.client_port = ping.client_port;
       return Transition{.model = std::move(next),
                         .effects = {StartStreaming{.session_id = model.session_id,
-                                                   .client_ip = next.client_ip,
-                                                   .client_port = next.client_port}}};
+                                                   .client_ip = ping.client_ip,
+                                                   .client_port = ping.client_port}}};
     }
     if (std::holds_alternative<RunnerExited>(input)) {
       return stop(model, "runner exited");

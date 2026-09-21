@@ -112,10 +112,10 @@ TEST_CASE("scope_pipeline_to_node rewrites only device-specific elements", "[enc
     REQUIRE(out == "vah264enc device=/dev/dri/renderD129 ! queue");
   }
 
-  SECTION("NVIDIA gets a cuda-device= index") {
+  SECTION("NVIDIA gets a cuda-device-id= index") {
     auto resolver = [](const std::string &) { return std::optional<std::string>("1"); };
     auto out = scope_pipeline_to_node("nvh264enc ! queue", "/dev/dri/renderD136", GpuVendor::Nvidia, resolver);
-    REQUIRE(out == "nvh264enc cuda-device=1 ! queue");
+    REQUIRE(out == "nvh264enc cuda-device-id=1 ! queue");
   }
 
   SECTION("NVIDIA without a resolvable index is left unchanged") {

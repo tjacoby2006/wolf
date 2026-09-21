@@ -48,6 +48,16 @@ template <typename T> bool has(const std::vector<LobbyEffect> &effects) {
   return false;
 }
 
+/** @return the first effect of type `T`, so tests can assert on its payload. */
+template <typename T> const T *find(const std::vector<LobbyEffect> &effects) {
+  for (const auto &effect : effects) {
+    if (std::holds_alternative<T>(effect)) {
+      return &std::get<T>(effect);
+    }
+  }
+  return nullptr;
+}
+
 /** Drive a lobby to the steady `RunnerRunning` state. */
 LobbyModel running_lobby(bool multi_user = true, bool stop_when_empty = true) {
   auto model = new_lobby("lobby-1", multi_user, stop_when_empty);
@@ -59,6 +69,27 @@ LobbyModel running_lobby(bool multi_user = true, bool stop_when_empty = true) {
 }
 
 } // namespace
+
+TEST_CASE("lobby effects carry their payload past the model move", "[lobby]") {
+  // Same regression as the session machine: reading `next.render_node` while moving `next` into
+  // `LobbyTransition::model` yields "" because the move is evaluated first.
+  auto model = new_lobby();
+
+  auto t = step_lobby(model, StartLobby{});
+  t = step_lobby(t.model, LobbyGpuAssigned{.render_node = "/dev/dri/renderD129"});
+
+  auto desktop = find<StartLobbyDesktop>(t.effects);
+  REQUIRE(desktop != nullptr);
+  REQUIRE(desktop->render_node == "/dev/dri/renderD129");
+  REQUIRE(desktop->width == 1920);
+  REQUIRE(desktop->height == 1080);
+  REQUIRE(desktop->refresh_rate == 60);
+
+  t = step_lobby(t.model, LobbyDesktopReady{.wayland_socket_name = "wayland-1"});
+  auto runner = find<StartLobbyRunner>(t.effects);
+  REQUIRE(runner != nullptr);
+  REQUIRE(runner->render_node == "/dev/dri/renderD129");
+}
 
 TEST_CASE("lobby walks the happy path in order", "[lobby]") {
   auto model = new_lobby();

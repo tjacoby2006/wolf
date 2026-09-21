@@ -119,7 +119,12 @@ std::string scope_pipeline_to_node(const std::string &pipeline,
     return result;
   }
 
-  // NVIDIA: nvcodec elements are addressed by CUDA device index via the `cuda-device` property.
+  // NVIDIA: nvcodec elements are addressed by CUDA device index via the `cuda-device-id`
+  // property (GstNvH26xEnc:cuda-device-id / GstNvAv1Enc:cuda-device-id). Note that the property is
+  // *not* called `cuda-device`: using the wrong name makes gst_parse_launch fail with
+  // "no property \"cuda-device\" in element \"nvh265enc\"" and the encoder is never linked.
+  // `cudaupload`/`cudaconvertscale` take the device from the GstCudaContext that the pipeline pulls
+  // in via NEED_CONTEXT, so only the encoder itself has to be re-pointed here.
   if (vendor == GpuVendor::Nvidia) {
     auto idx = nvidia_index(render_node);
     if (!idx) {
@@ -127,8 +132,8 @@ std::string scope_pipeline_to_node(const std::string &pipeline,
     }
     std::string result = pipeline;
     for (const auto &el : {"nvh264enc", "nvh265enc", "nvav1enc"}) {
-      std::regex re(std::string("(\\b") + el + std::string("\\b)(?!\\s*cuda-device=)"));
-      result = std::regex_replace(result, re, "$1 cuda-device=" + *idx);
+      std::regex re(std::string("(\\b") + el + std::string("\\b)(?!\\s*cuda-device-id=)"));
+      result = std::regex_replace(result, re, "$1 cuda-device-id=" + *idx);
     }
     return result;
   }

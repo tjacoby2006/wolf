@@ -57,6 +57,16 @@ template <typename T> bool has(const std::vector<SessionEffect> &effects) {
   return false;
 }
 
+/** @return the first effect of type `T`, so tests can assert on its payload. */
+template <typename T> const T *find(const std::vector<SessionEffect> &effects) {
+  for (const auto &effect : effects) {
+    if (std::holds_alternative<T>(effect)) {
+      return &std::get<T>(effect);
+    }
+  }
+  return nullptr;
+}
+
 } // namespace
 
 TEST_CASE("session walks the happy path in order", "[session]") {
@@ -93,6 +103,37 @@ TEST_CASE("session walks the happy path in order", "[session]") {
   t = step(t.model, TeardownComplete{});
   REQUIRE(t.model.state == SessionState::Stopped);
   REQUIRE(is_terminal(t.model.state));
+}
+
+TEST_CASE("effects carry their payload past the model move", "[session]") {
+  // Regression: the assignment and ping transitions build `Transition{model = std::move(next),
+  // effects = {...}}`. `Transition::model` is declared before `Transition::effects`, so the move
+  // runs first and any field read off `next` while building the effects is moved-from ("" for a
+  // std::string). That silently produced `waylanddisplaysrc ... render_node=` (empty), which made
+  // gst-wayland-display abort with "Failed to open drm node !". Assert the payloads are intact.
+  auto model = new_session();
+
+  auto t = step(model, StartSession{});
+  t = step(t.model, GpuAssigned{.render_node = "/dev/dri/renderD129"});
+
+  auto desktop = find<StartDesktop>(t.effects);
+  REQUIRE(desktop != nullptr);
+  REQUIRE(desktop->render_node == "/dev/dri/renderD129");
+  REQUIRE(desktop->width == 1920);
+  REQUIRE(desktop->height == 1080);
+  REQUIRE(desktop->refresh_rate == 60);
+
+  t = step(t.model, DesktopReady{.wayland_socket_name = "wayland-1"});
+  auto runner = find<StartRunner>(t.effects);
+  REQUIRE(runner != nullptr);
+  REQUIRE(runner->render_node == "/dev/dri/renderD129");
+
+  t = step(t.model, RunnerStarted{});
+  t = step(t.model, RtpPingReceived{.client_ip = "10.0.0.2", .client_port = 48000});
+  auto streaming = find<StartStreaming>(t.effects);
+  REQUIRE(streaming != nullptr);
+  REQUIRE(streaming->client_ip == "10.0.0.2");
+  REQUIRE(streaming->client_port == 48000);
 }
 
 TEST_CASE("pause and resume round-trip", "[session]") {
