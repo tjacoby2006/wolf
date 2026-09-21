@@ -8,8 +8,10 @@ target_sources(wolf_docker
         docker/formatters.hpp
 
         PRIVATE
+        docker/docker_client.hpp
         docker/json_formatters.hpp
-        docker/docker.cpp)
+        docker/docker.cpp
+        docker/docker_client.cpp)
 
 find_package(CURL) # REQUIRED UnixSockets removed because it doesn't work in Github Actions
 target_link_libraries(wolf_docker
