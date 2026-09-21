@@ -31,6 +31,147 @@ static std::optional<std::string> get_device_major(std::string_view type) {
   return std::nullopt;
 }
 
+/**
+ * @brief Vendor-specific scoping of the container to the single GPU the balancer assigned us.
+ *
+ * A render node alone does not identify the physical GPU, so this is where each vendor's way of
+ * limiting a container to one device lives. For NVIDIA there are two mechanisms, both of which
+ * must agree on the same device:
+ *  - env vars (`NVIDIA_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES`) work in BOTH the
+ *    nvidia-container-toolkit and the custom driver-volume (NVIDIA_DRIVER_VOLUME_NAME) setups
+ *    and are what games/entrypoints actually consult to pick a device;
+ *  - `DeviceRequests` + `Runtime=nvidia` only means something with the toolkit (no driver
+ *    volume), where the nvidia runtime injects the scoped `/dev/nvidia*` devices.
+ * Intel/AMD render nodes are already 1:1 with the device, so this is a no-op for them.
+ *
+ * Mutates `env` in place; returns the (possibly rewritten) container options JSON.
+ */
+static std::string scope_container_to_nvidia_gpu(std::string_view session_id,
+                                                std::string_view render_node,
+                                                std::vector<std::string> &env,
+                                                std::string json_opts) {
+  if (get_vendor(render_node) != NVIDIA) {
+    return json_opts;
+  }
+  auto nvidia_device = get_nvidia_device_index(render_node);
+  if (!nvidia_device) {
+    logs::log(logs::warning, "[DOCKER] Could not determine NVIDIA device index for {}, falling back to all GPUs", render_node);
+  }
+  auto visible_devices = nvidia_device ? *nvidia_device : "all";
+  logs::log(logs::info, "[DOCKER] NVIDIA scoping for session {}: visible_devices={}", session_id, visible_devices);
+
+  // Setup -e NVIDIA_VISIBLE_DEVICES=<assigned>  -e CUDA_VISIBLE_DEVICES=<assigned>
+  // -e NVIDIA_DRIVER_CAPABILITIES=all if not present. Runs in both driver-volume and toolkit modes.
+  {
+    auto nvd_env = std::find_if(env.begin(), env.end(), [](const std::string &e) {
+      return e.find("NVIDIA_VISIBLE_DEVICES") != std::string::npos;
+    });
+    if (nvd_env == env.end()) {
+      env.push_back(fmt::format("NVIDIA_VISIBLE_DEVICES={}", visible_devices));
+    } else {
+      logs::log(logs::warning, "[DOCKER] NVIDIA_VISIBLE_DEVICES already set in env for session {}, skipping scoping", session_id);
+    }
+
+    auto cuda_env = std::find_if(env.begin(), env.end(), [](const std::string &e) {
+      return e.find("CUDA_VISIBLE_DEVICES") != std::string::npos;
+    });
+    if (cuda_env == env.end()) {
+      env.push_back(fmt::format("CUDA_VISIBLE_DEVICES={}", visible_devices));
+    }
+
+    auto nvd_caps_env = std::find_if(env.begin(), env.end(), [](const std::string &e) {
+      return e.find("NVIDIA_DRIVER_CAPABILITIES") != std::string::npos;
+    });
+    if (nvd_caps_env == env.end()) {
+      env.push_back("NVIDIA_DRIVER_CAPABILITIES=all");
+    }
+  }
+
+  // Add the equivalent of --gpus (scoped to the assigned GPU) only when using the nvidia-container-toolkit,
+  // i.e. without the custom driver volume. With a driver volume there is no nvidia runtime to inject devices,
+  // so the env vars above are what constrain the container to its assigned GPU.
+  if (!utils::get_env("NVIDIA_DRIVER_VOLUME_NAME")) {
+    logs::log(logs::info, "NVIDIA_DRIVER_VOLUME_NAME not set, assuming nvidia driver toolkit is installed..");
+    auto parsed_json = utils::parse_json(json_opts).as_object();
+    auto default_gpu_config = boost::json::array{                    // [
+                                                  boost::json::object{// {
+                                                                      {"DeviceIDs", visible_devices},
+                                                                      {"Capabilities", boost::json::array{{"gpu"}}}}};
+    if (auto host_config_ptr = parsed_json.if_contains("HostConfig")) {
+      auto host_config = host_config_ptr->as_object();
+      if (host_config.find("DeviceRequests") == host_config.end()) {
+        host_config["DeviceRequests"] = default_gpu_config;
+        host_config["Runtime"] = "nvidia";
+        parsed_json["HostConfig"] = host_config;
+        json_opts = boost::json::serialize(parsed_json);
+      } else {
+        logs::log(logs::debug, "DeviceRequests manually set in base_create_json, skipping..");
+      }
+    } else {
+      logs::log(logs::warning, "HostConfig not found in base_create_json.");
+      parsed_json["HostConfig"] = boost::json::object{{"DeviceRequests", default_gpu_config}, {"Runtime", "nvidia"}};
+      json_opts = boost::json::serialize(parsed_json);
+    }
+  }
+  return json_opts;
+}
+
+/**
+ * @brief Point the container's Wolf socket mount at the host's per-session XDG runtime dir.
+ *
+ * Only applies when the runner expects the socket (`WOLF_SOCKET_PATH` present in the container
+ * env) and the host path was not overridden via the `WOLF_SOCKET_PATH` env var.
+ */
+static void remap_wolf_socket_mount(std::string_view host_xdg_runtime_dir,
+                                    const std::vector<std::string> &env,
+                                    std::vector<MountPoint> &mounts) {
+  auto socket_path_container_env = std::find_if(env.begin(), env.end(), [](const std::string &e) {
+    return e.find("WOLF_SOCKET_PATH") != std::string::npos;
+  });
+  if (utils::get_env("WOLF_SOCKET_PATH") || socket_path_container_env == env.end()) {
+    return;
+  }
+  // Change the associated mount point to pick up the right path from the host
+  for (auto &mount : mounts) {
+    if (mount.destination.find("wolf.sock") != std::string::npos) {
+      mount.source = std::filesystem::path(host_xdg_runtime_dir) / "wolf.sock";
+      break;
+    }
+  }
+}
+
+/**
+ * @brief Let the container create the dynamically-numbered hidraw/input devices the virtual DualSense needs.
+ *
+ * `hidraw` and `input` get their major numbers at runtime, so they cannot be listed statically;
+ * read them from `/proc/devices` and add the matching `DeviceCgroupRules`. Returns the (possibly
+ * rewritten) container options JSON.
+ */
+static std::string add_input_device_cgroup_rules(std::string json_opts) {
+  auto hidraw_major = get_device_major("hidraw");
+  auto input_major = get_device_major("input");
+  if (!hidraw_major || !input_major) {
+    logs::log(logs::warning, "[DOCKER] Failed to get major numbers for hidraw and input");
+    return json_opts;
+  }
+  logs::log(logs::debug, "[DOCKER] Setting DeviceCgroupRules for hidraw:{} and input:{}", *hidraw_major, *input_major);
+
+  auto rules = json::array{
+      fmt::format("c {}:* rwm", *hidraw_major),
+      fmt::format("c {}:* rwm", *input_major),
+  };
+
+  auto parsed_json = utils::parse_json(json_opts).as_object();
+  if (auto host_config_ptr = parsed_json.if_contains("HostConfig")) {
+    auto host_config = host_config_ptr->as_object();
+    host_config["DeviceCgroupRules"] = rules;
+    parsed_json["HostConfig"] = host_config;
+  } else {
+    parsed_json["HostConfig"] = json::object{{"DeviceCgroupRules", rules}};
+  }
+  return boost::json::serialize(parsed_json);
+}
+
 void RunDocker::run(std::string_view session_id,
                     std::string_view app_state_folder,
                     std::string_view host_xdg_runtime_dir,
@@ -83,127 +224,16 @@ void RunDocker::run(std::string_view session_id,
               fake_udev_cli_path);
   }
 
-  // Scope the app container to only the GPU assigned by the balancer so that multiple containers can
-  // share the host. This is done two ways, both of which must agree on the same device:
-  //  - env vars (NVIDIA_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES): work in BOTH the nvidia-container-toolkit
-  //    and the custom driver volume (NVIDIA_DRIVER_VOLUME_NAME) setups, and are what games/entrypoints
-  //    actually consult to pick a device.
-  //  - DeviceRequests + Runtime=nvidia: only meaningful with the toolkit (no driver volume), where it
-  //    injects the scoped /dev/nvidia* devices via the nvidia runtime.
+  // Scope the app container to only the GPU the balancer assigned us, then wire up the Wolf socket
+  // and the dynamic input-device cgroup rules. Each step is a named, vendor-aware helper above so
+  // that vendor-specific pathways stay out of this orchestration method.
   auto final_json_opts = this->base_create_json;
   logs::log(logs::info, "[DOCKER] Scoping container for session {} to render node {}", session_id, render_node);
-  if (get_vendor(render_node) == NVIDIA) {
-    auto nvidia_device = get_nvidia_device_index(render_node);
-    if (!nvidia_device) {
-      logs::log(logs::warning, "[DOCKER] Could not determine NVIDIA device index for {}, falling back to all GPUs", render_node);
-    }
-    auto visible_devices = nvidia_device ? *nvidia_device : "all";
-    logs::log(logs::info, "[DOCKER] NVIDIA scoping for session {}: visible_devices={}", session_id, visible_devices);
+  final_json_opts = scope_container_to_nvidia_gpu(session_id, render_node, full_env, std::move(final_json_opts));
 
-    // Setup -e NVIDIA_VISIBLE_DEVICES=<assigned>  -e CUDA_VISIBLE_DEVICES=<assigned>
-    // -e NVIDIA_DRIVER_CAPABILITIES=all if not present. Runs in both driver-volume and toolkit modes.
-    {
-      auto nvd_env = std::find_if(full_env.begin(), full_env.end(), [](const std::string &env) {
-        return env.find("NVIDIA_VISIBLE_DEVICES") != std::string::npos;
-      });
-      if (nvd_env == full_env.end()) {
-        full_env.push_back(fmt::format("NVIDIA_VISIBLE_DEVICES={}", visible_devices));
-      } else {
-        logs::log(logs::warning, "[DOCKER] NVIDIA_VISIBLE_DEVICES already set in env for session {}, skipping scoping", session_id);
-      }
+  remap_wolf_socket_mount(host_xdg_runtime_dir, full_env, mounts);
 
-      auto cuda_env = std::find_if(full_env.begin(), full_env.end(), [](const std::string &env) {
-        return env.find("CUDA_VISIBLE_DEVICES") != std::string::npos;
-      });
-      if (cuda_env == full_env.end()) {
-        full_env.push_back(fmt::format("CUDA_VISIBLE_DEVICES={}", visible_devices));
-      }
-
-      auto nvd_caps_env = std::find_if(full_env.begin(), full_env.end(), [](const std::string &env) {
-        return env.find("NVIDIA_DRIVER_CAPABILITIES") != std::string::npos;
-      });
-      if (nvd_caps_env == full_env.end()) {
-        full_env.push_back("NVIDIA_DRIVER_CAPABILITIES=all");
-      }
-    }
-
-    // Add the equivalent of --gpus (scoped to the assigned GPU) only when using the nvidia-container-toolkit,
-    // i.e. without the custom driver volume. With a driver volume there is no nvidia runtime to inject devices,
-    // so the env vars above are what constrain the container to its assigned GPU.
-    if (!utils::get_env("NVIDIA_DRIVER_VOLUME_NAME")) {
-      logs::log(logs::info, "NVIDIA_DRIVER_VOLUME_NAME not set, assuming nvidia driver toolkit is installed..");
-      auto parsed_json = utils::parse_json(final_json_opts).as_object();
-      auto default_gpu_config = boost::json::array{                    // [
-                                                    boost::json::object{// {
-                                                                        {"DeviceIDs", visible_devices},
-                                                                        {"Capabilities", boost::json::array{{"gpu"}}}}};
-      if (auto host_config_ptr = parsed_json.if_contains("HostConfig")) {
-        auto host_config = host_config_ptr->as_object();
-        if (host_config.find("DeviceRequests") == host_config.end()) {
-          host_config["DeviceRequests"] = default_gpu_config;
-          host_config["Runtime"] = "nvidia";
-          parsed_json["HostConfig"] = host_config;
-          final_json_opts = boost::json::serialize(parsed_json);
-        } else {
-          logs::log(logs::debug, "DeviceRequests manually set in base_create_json, skipping..");
-        }
-      } else {
-        logs::log(logs::warning, "HostConfig not found in base_create_json.");
-        parsed_json["HostConfig"] = boost::json::object{{"DeviceRequests", default_gpu_config}, {"Runtime", "nvidia"}};
-        final_json_opts = boost::json::serialize(parsed_json);
-      }
-    }
-  }
-
-  { // Setup Wolf socket path (if the runner needs it, and it hasn't been overridden via ENV)
-    auto socket_path_container_env = std::find_if(full_env.begin(), full_env.end(), [](const std::string &env) {
-      return env.find("WOLF_SOCKET_PATH") != std::string::npos;
-    });
-    if (!get_env("WOLF_SOCKET_PATH") && socket_path_container_env != full_env.end()) {
-      // Change the associated mount point to pick up the right path from the host
-      for (auto &mount : mounts) {
-        if (mount.destination.find("wolf.sock") != std::string::npos) {
-          mount.source = std::filesystem::path(host_xdg_runtime_dir) / "wolf.sock";
-          break;
-        }
-      }
-    }
-  }
-
-  // when creating a virtual DualSense device we need to also mount a `/dev/hidraw*` device.
-  // unfortunately hidraw devices use dynamically assigned major numbers rather than static ones
-  // so we'll get the major number from reading `/proc/devices` for `hidraw` and `input`
-  // and set the right entries in `DeviceCgroupRules`
-  {
-    auto hidraw_major = get_device_major("hidraw");
-    auto input_major = get_device_major("input");
-    if (hidraw_major && input_major) {
-      logs::log(logs::debug,
-                "[DOCKER] Setting DeviceCgroupRules for hidraw:{} and input:{}",
-                *hidraw_major,
-                *input_major);
-      auto parsed_json = utils::parse_json(final_json_opts).as_object();
-      if (auto host_config_ptr = parsed_json.if_contains("HostConfig")) {
-        auto host_config = host_config_ptr->as_object();
-        host_config["DeviceCgroupRules"] = json::array{
-            fmt::format("c {}:* rwm", *hidraw_major),
-            fmt::format("c {}:* rwm", *input_major),
-        };
-        parsed_json["HostConfig"] = host_config;
-      } else {
-        parsed_json["HostConfig"] = json::object{
-            {"DeviceCgroupRules",
-             json::array{
-                 fmt::format("c {}:* rwm", *hidraw_major),
-                 fmt::format("c {}:* rwm", *input_major),
-             }},
-        };
-      }
-      final_json_opts = boost::json::serialize(parsed_json);
-    } else {
-      logs::log(logs::warning, "[DOCKER] Failed to get major numbers for hidraw and input");
-    }
-  }
+  final_json_opts = add_input_device_cgroup_rules(std::move(final_json_opts));
 
   logs::log(logs::debug, "[DOCKER] Container options: {}", final_json_opts);
 

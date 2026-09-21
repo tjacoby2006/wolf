@@ -132,7 +132,9 @@ target_link_libraries(
 
 target_include_directories(wolf_runner PUBLIC .)
 
-file(GLOB HEADER_LIST CONFIGURE_DEPENDS */*.hpp)
+# Headers nested one level deeper than a module directory (e.g. `rest/endpoints/*.hpp`) are
+# grouped by workflow; include them so they show up in IDEs and stay part of the target sources.
+file(GLOB HEADER_LIST CONFIGURE_DEPENDS */*.hpp */*/*.hpp)
 file(GLOB SRC_LIST SRCS
         api/*.cpp
         audio/*.cpp
