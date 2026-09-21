@@ -39,6 +39,7 @@ struct SessionContext {
  * result is fed back into the actor as an input:
  *
  *   AssignGpu      -> gpu_balancer.pick + acquire_sticky        -> GpuAssigned / StopRequested
+ *   AdoptSession   -> running_sessions upsert                   -> (no feedback)
  *   StartDesktop   -> streaming::start_video_producer           -> DesktopReady / DesktopFailed
  *   StartRunner    -> sessions::start_runner (blocking)         -> RunnerStarted / RunnerExited
  *   StartStreaming -> streaming::start_streaming_video/audio    -> (no feedback)
@@ -54,6 +55,8 @@ public:
   void execute(const wolf::session::SessionEffect &effect) override;
 
 private:
+  /** Register this session in `running_sessions` (idempotent; see `state::add_session`). */
+  void adopt_session(std::uint64_t session_id);
   void assign_gpu(std::uint64_t session_id);
   void start_desktop(std::uint64_t session_id, const std::string &render_node);
   void start_runner(std::uint64_t session_id, const std::string &render_node);

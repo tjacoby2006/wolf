@@ -17,6 +17,19 @@ namespace wolf::session {
  * emitted effects without any hardware, containers or event bus.
  */
 
+/**
+ * Register this session in the running-session registry.
+ *
+ * Registration is synchronous and idempotent. Protocol adapters (REST `/launch`, the wolf-ui API)
+ * upsert the session *before* replying to the client, because the RTSP handshake and the control
+ * channel look it up immediately. The actor then adopts the session as the first step of its
+ * lifecycle, re-asserting that same entry through `state::add_session` (which upserts by
+ * `session_id`), so the adapter registering first never produces a duplicate.
+ */
+struct AdoptSession {
+  std::uint64_t session_id = 0;
+};
+
 /** Pick a GPU/render node for this session (load balancer + sticky assignment). */
 struct AssignGpu {
   std::uint64_t session_id = 0;
@@ -82,7 +95,8 @@ struct ReleaseGpu {
   std::uint64_t session_id = 0;
 };
 
-using SessionEffect = std::variant<AssignGpu,
+using SessionEffect = std::variant<AdoptSession,
+                                   AssignGpu,
                                    StartDesktop,
                                    StartRunner,
                                    StartStreaming,

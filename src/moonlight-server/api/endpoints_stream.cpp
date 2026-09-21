@@ -95,8 +95,12 @@ void UnixSocketServer::endpoint_StreamSessionAdd(const HTTPRequest &req, std::sh
     new_session->ip = ss.client_ip;
     new_session->rtsp_fake_ip = ss.rtsp_fake_ip;
 
-    state_->app_state->running_sessions->update(
-        [new_session](const immer::vector<events::StreamSession> &ses_v) { return ses_v.push_back(*new_session); });
+    // Register before the event: callers of the unix-socket API immediately start the session
+    // (RTSP setup, `StartRunner`) and look it up in `running_sessions`. Upserting means the
+    // session's actor can register it too, when it adopts the session, without a duplicate.
+    state_->app_state->running_sessions->update([new_session](const immer::vector<events::StreamSession> &ses_v) {
+      return state::add_session(ses_v, *new_session);
+    });
     state_->app_state->event_bus->fire_event(immer::box<events::StreamSession>(*new_session));
 
     auto res = StreamSessionCreated{.success = true, .session_id = std::to_string(new_session->session_id)};

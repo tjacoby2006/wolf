@@ -20,7 +20,9 @@ void MoonlightSessionRuntime::execute(const SessionEffect &effect) {
   std::visit(
       [this](const auto &e) {
         using T = std::decay_t<decltype(e)>;
-        if constexpr (std::is_same_v<T, AssignGpu>) {
+        if constexpr (std::is_same_v<T, AdoptSession>) {
+          adopt_session(e.session_id);
+        } else if constexpr (std::is_same_v<T, AssignGpu>) {
           assign_gpu(e.session_id);
         } else if constexpr (std::is_same_v<T, StartDesktop>) {
           start_desktop(e.session_id, e.render_node);
@@ -67,6 +69,22 @@ void MoonlightSessionRuntime::forward_resume(std::uint64_t session_id) {
 void MoonlightSessionRuntime::forward_idr(std::uint64_t session_id) {
   context_.stream_session->event_bus->fire_event(
       immer::box<events::IDRRequestEvent>(events::IDRRequestEvent{.session_id = session_id}));
+}
+
+void MoonlightSessionRuntime::adopt_session(std::uint64_t session_id) {
+  auto session = context_.stream_session;
+
+  // The protocol adapters (REST `/launch`, the wolf-ui API) register the session before they reply
+  // to the client, because the RTSP handshake and the control channel look it up immediately. The
+  // actor adopts the session as the first step of its lifecycle, so it (re-)asserts that entry:
+  // `add_session` upserts by `session_id` (which is derived from the client), so re-registering is
+  // idempotent and never leaves a duplicate for `/sessions`, `/cancel` or the RTP-ping fan-out.
+  context_.app_state->running_sessions->update(
+      [session](const immer::vector<events::StreamSession> &sessions) {
+        return state::add_session(sessions, *session);
+      });
+
+  logs::log(logs::debug, "[SESSION] Adopted session {}", session_id);
 }
 
 void MoonlightSessionRuntime::assign_gpu(std::uint64_t session_id) {

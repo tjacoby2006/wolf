@@ -430,9 +430,17 @@ void launch(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
 
   auto client_ip = get_client_ip<SimpleWeb::HTTPS>(request);
   auto new_session = create_run_session(request->parse_query_string(), client_ip, current_client, state, app.value());
+
+  // Register the session *before* the client is told the launch succeeded: the RTSP handshake and
+  // the control channel look it up (by client id, and later by RTP secret) and would not find it
+  // otherwise. Upserting (rather than appending) means the session's actor can also register it
+  // when it adopts the session, without producing a duplicate.
+  state->running_sessions->update([new_session](const immer::vector<events::StreamSession> &ses_v) {
+    return state::add_session(ses_v, *new_session);
+  });
+
+  // Hand the session to its actor, which owns the rest of the lifecycle from here on.
   state->event_bus->fire_event(immer::box<events::StreamSession>(*new_session));
-  state->running_sessions->update(
-      [new_session](const immer::vector<events::StreamSession> &ses_v) { return ses_v.push_back(*new_session); });
 
   auto rtsp_ip = get_rtsp_ip_string(get_host_ip<SimpleWeb::HTTPS>(request, state), *new_session);
   auto xml = moonlight::launch_success(rtsp_ip, std::to_string(get_port(state::RTSP_SETUP_PORT)));

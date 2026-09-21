@@ -128,4 +128,19 @@ inline immer::vector<events::StreamSession> remove_session(const immer::vector<e
            })                                                                                               //
          | ranges::to<immer::vector<events::StreamSession>>();                                              //
 }
+
+/**
+ * Insert a session into the registry, replacing any existing entry for the same `session_id`.
+ *
+ * `session_id` is derived from the client, so a relaunch/resume of the same client reuses it.
+ * Appending blindly would leave two entries for one client, which made `/sessions` list the
+ * session twice, made `/cancel` remove only one copy, and made the RTP-ping fan-out post the
+ * same input to every duplicate. Upserting keeps "one client, one session" true whether the
+ * caller is a protocol adapter (before the client is told the launch succeeded) or the session's
+ * own actor (which owns the lifecycle).
+ */
+inline immer::vector<events::StreamSession> add_session(const immer::vector<events::StreamSession> &sessions,
+                                                        const events::StreamSession &session) {
+  return remove_session(sessions, session).push_back(session);
+}
 } // namespace state

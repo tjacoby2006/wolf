@@ -155,6 +155,60 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
       }));
 
   /*
+   * A runner can also be started out-of-band, *after* a session already exists: wolf-ui creates a
+   * session through the unix-socket API (`StreamSessionAdd`) and then names the runner — and
+   * whether the stream should stop with it — via `StartRunner`. That path does not go through a
+   * SessionActor, so it is served here, exactly as the old `StartRunner` handler did.
+   */
+  handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StartRunner>>(
+      [app_state, plugged_devices_queue, runtime_dir, audio_server](const immer::box<events::StartRunner> &run_session) {
+        auto session = run_session->stream_session;
+        auto session_id = std::to_string(session->session_id);
+        auto devices_q = plugged_devices_queue->load()->find(session_id);
+        if (!devices_q) {
+          logs::log(logs::warning, "[START_RUNNER] No devices queue found for session {}", session_id);
+          return;
+        }
+
+        std::thread([session, app_state, audio_server, runtime_dir, session_id, devices_q, run_session]() {
+          // The runner must use the same GPU as the compositor. `assigned_render_node` is populated by
+          // the session's actor once it picks one; fall back to the app's configured node otherwise.
+          auto render_node = session->assigned_render_node.empty() ? session->app->render_node
+                                                                   : session->assigned_render_node;
+
+          wolf::core::sessions::start_runner(
+              run_session->runner,
+              *devices_q,
+              immer::box<RunnerArgs>{RunnerArgs{
+                  .session_id = session_id,
+                  .video_settings =
+                      {
+                          .width = session->display_mode.width,
+                          .height = session->display_mode.height,
+                          .refresh_rate = session->display_mode.refreshRate,
+                          .wayland_render_node = render_node,
+                          .runner_render_node = render_node,
+                          .video_producer_buffer_caps = session->app->video_producer_buffer_caps,
+                      },
+                  .wayland_display = session->wayland_display->load(),
+                  .audio_server = audio_server,
+                  .audio_sink = session->audio_sink->load(),
+                  .host = app_state->host,
+                  .app_local_state_folder = session->app_local_state_folder,
+                  .app_host_state_folder = session->app_host_state_folder,
+                  .xdg_runtime_dir = runtime_dir,
+                  .client_settings = session->client_settings}});
+
+          // The runner process ended.
+          if (run_session->stop_stream_when_over) {
+            session->wayland_display->store(nullptr);
+            app_state->event_bus->fire_event(immer::box<events::StopStreamEvent>(
+                events::StopStreamEvent{.session_id = session->session_id}));
+          }
+        }).detach();
+      }));
+
+  /*
    * Route the client's RTP ping to the session's actor so it can advance to `Streaming`.
    *
    * The ping is matched against the session exactly as the old `wait_for_ping` did: the client

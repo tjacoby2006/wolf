@@ -8,10 +8,8 @@ namespace {
 
 /** Build a `Teardown` + `ReleaseGpu` pair for a session that is going away. */
 std::vector<SessionEffect> teardown_effects(std::uint64_t session_id, std::string reason) {
-  return {
-      Teardown{.session_id = session_id, .reason = std::move(reason)},
-      ReleaseGpu{.session_id = session_id},
-  };
+  return {Teardown{.session_id = session_id, .reason = std::move(reason)},
+          ReleaseGpu{.session_id = session_id}};
 }
 
 /** Move to `Failed`, tearing down whatever was already started. */
@@ -27,6 +25,18 @@ Transition stop(const SessionModel &model, std::string reason) {
   auto next = model;
   next.state = SessionState::Stopping;
   return Transition{.model = std::move(next), .effects = teardown_effects(model.session_id, std::move(reason))};
+}
+
+/**
+ * Build the effects for adopting a session and asking the runtime to pick a GPU.
+ *
+ * Registration happens *first* so that the session is already visible in `running_sessions` when
+ * the GPU is assigned: a viewer can hit RTSP setup as soon as the runner reports ready.
+ */
+Transition adopt(const SessionModel &model) {
+  return Transition{.model = model,
+                    .effects = {AdoptSession{.session_id = model.session_id},
+                                AssignGpu{.session_id = model.session_id}}};
 }
 
 /** No-op transition: ignore an input that is not valid in the current state. */
@@ -60,8 +70,7 @@ Transition step(const SessionModel &model, const SessionInput &input) {
   switch (model.state) {
   case SessionState::Created:
     if (std::holds_alternative<StartSession>(input)) {
-      // Ask the runtime to pick a GPU; it replies with `GpuAssigned`.
-      return effect_only(model, AssignGpu{.session_id = model.session_id});
+      return adopt(model);
     }
     if (std::holds_alternative<GpuAssigned>(input)) {
       auto next = model;
