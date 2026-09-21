@@ -191,6 +191,14 @@ public:
   void broadcast_event(const std::string &event_type, const std::string &event_json);
 
 private:
+  /**
+   * Register every HTTP route on `state_->http`.
+   *
+   * Kept out of the constructor so the constructor stays a short, readable bootstrap and the route
+   * table lives in its own translation unit (`unix_socket_routes.cpp`).
+   */
+  void register_routes();
+
   void endpoint_Events(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void endpoint_PendingPairRequest(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
