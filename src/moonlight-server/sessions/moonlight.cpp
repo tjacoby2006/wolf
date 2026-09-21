@@ -131,6 +131,18 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         auto runtime = std::make_shared<MoonlightSessionRuntime>(std::move(context));
 
         auto actor = std::make_shared<wolf::session::SessionActor>(std::move(model), runtime);
+
+        // When the actor finishes on its own (e.g. the runner exited), drop our reference so the
+        // actor, its runtime and the session are freed. The callback runs on the actor's worker
+        // thread, so the erase happens on a detached thread (destroying the actor joins its worker).
+        auto actors = active_actors;
+        auto session_id = stream_session->session_id;
+        actor->set_on_finished([actors, session_id]() {
+          std::thread([actors, session_id]() {
+            actors->update([session_id](const auto &map) { return map.erase(session_id); });
+          }).detach();
+        });
+
         actor->start();
 
         // Kick off the lifecycle. The runtime feeds the rest of the inputs back as effects complete.

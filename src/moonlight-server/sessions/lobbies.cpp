@@ -58,6 +58,18 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         auto runtime = std::make_shared<MoonlightLobbyRuntime>(std::move(context));
 
         auto actor = std::make_shared<wolf::session::LobbyActor>(std::move(model), runtime);
+
+        // When the actor finishes on its own (e.g. the runner exited, or the last session left),
+        // drop our reference so the actor, its runtime and the lobby are freed. The callback runs on
+        // the actor's worker thread, so the erase happens on a detached thread.
+        auto actors = active_lobby_actors;
+        auto lobby_id = lobby->id;
+        actor->set_on_finished([actors, lobby_id]() {
+          std::thread([actors, lobby_id]() {
+            actors->update([lobby_id](const auto &map) { return map.erase(lobby_id); });
+          }).detach();
+        });
+
         actor->start();
 
         // Kick off the lifecycle. The runtime feeds the rest of the inputs back as effects complete.

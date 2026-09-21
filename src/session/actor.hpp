@@ -140,6 +140,17 @@ public:
    */
   void set_stop_input(Input input) { stop_input_ = std::move(input); }
 
+  /**
+   * Register a callback invoked once the worker has finished (the model reached a terminal state,
+   * or `stop()` was called).
+   *
+   * This is how an owner learns that an actor terminated on its own — e.g. because the runner
+   * exited — and can drop its reference. The callback runs on the actor's worker thread, so it must
+   * NOT destroy the actor directly (that would join the worker from itself); owners typically hand
+   * the cleanup to another thread.
+   */
+  void set_on_finished(std::function<void()> callback) { on_finished_ = std::move(callback); }
+
 private:
   void run() {
     {
@@ -169,6 +180,15 @@ private:
         running_.store(false);
       }
     }
+
+    // The worker is done: let the owner drop its reference (on another thread, since destroying
+    // this actor would join the very thread we are running on). Invoke a *copy* of the callback:
+    // the owner may destroy this actor from the thread it spawns, which would otherwise free the
+    // member we are still executing.
+    if (on_finished_) {
+      auto callback = on_finished_;
+      callback();
+    }
   }
 
   Model model_;
@@ -179,6 +199,7 @@ private:
   std::thread worker_;
   std::atomic_bool running_{false};
   Input stop_input_{};
+  std::function<void()> on_finished_;
 
   mutable std::mutex snapshot_mutex_;
   Model snapshot_;

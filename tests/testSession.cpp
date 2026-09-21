@@ -204,6 +204,30 @@ TEST_CASE("actor drives the machine on its own thread", "[session]") {
   REQUIRE(has<Teardown>(runtime->effects));
 }
 
+TEST_CASE("the actor reports when it finishes on its own", "[session]") {
+  auto runtime = std::make_shared<AutoPilotRuntime>();
+  auto actor = std::make_shared<SessionActor>(new_session(9), runtime);
+
+  auto finished = std::make_shared<std::atomic_bool>(false);
+  actor->set_on_finished([finished]() { finished->store(true); });
+
+  actor->start();
+  actor->post(StartSession{});
+
+  // Drive the session to Streaming, then stop it: the actor reaches a terminal state and reports.
+  for (int i = 0; i < 100 && actor->snapshot().state != SessionState::RunnerRunning; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  actor->post(StopRequested{.reason = "done"});
+
+  for (int i = 0; i < 100 && !finished->load(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(finished->load());
+
+  actor->stop();
+}
+
 TEST_CASE("runtime feedback drives the session to completion", "[session]") {
   // The runtime reacts to each effect by posting the matching input, so the actor should walk the
   // whole lifecycle without any external input beyond the initial GPU assignment.
