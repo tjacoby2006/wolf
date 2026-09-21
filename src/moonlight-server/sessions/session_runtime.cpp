@@ -175,20 +175,16 @@ void MoonlightSessionRuntime::start_desktop(std::uint64_t session_id, const std:
   auto display_mode = session->display_mode;
   auto buffer_caps = session->app->video_producer_buffer_caps;
 
-  // The compositor startup blocks, so run it off the actor's thread. The thread holds a shared_ptr
-  // to this runtime so it stays alive even if the actor (and its owning session) is torn down
-  // first; `post()` then safely drops the completion.
-  std::thread([self = shared_from_this(), session, session_id, render_node, buffer_caps, display_mode, gst_contexts, on_ready, event_bus, runtime_dir]() {
-    streaming::start_video_producer(std::to_string(session_id),
-                                    buffer_caps,
-                                    render_node,
-                                    {.width = display_mode.width,
-                                     .height = display_mode.height,
-                                     .refreshRate = display_mode.refreshRate},
-                                    gst_contexts,
-                                    on_ready,
-                                    event_bus);
-
+  // `start_video_producer` calls `run_pipeline`, which *blocks* until the pipeline reaches EOS or
+  // errors out, and it fulfils `on_ready` from the pipeline's own GStreamer bus thread when the
+  // Wayland socket is up. The producer and the readiness-waiter therefore have to be two separate
+  // threads: waiting on the future from the thread that is running the pipeline would deadlock
+  // before the pipeline ever signalled readiness (no `DesktopReady`, so the runner never starts,
+  // and no compositor wired into the session, so no virtual input devices exist).
+  //
+  // The waiter holds a shared_ptr to this runtime so it stays alive even if the actor (and its
+  // owning session) is torn down first; `post()` then safely drops the completion.
+  std::thread([self = shared_from_this(), session, on_ready, runtime_dir]() {
     auto ready = on_ready->get_future().get();
 
     // Wire the compositor up as the session's virtual display and input devices.
@@ -203,6 +199,20 @@ void MoonlightSessionRuntime::start_desktop(std::uint64_t session_id, const std:
       return;
     }
     self->post(DesktopReady{.wayland_socket_name = ready.wayland_socket_name});
+  }).detach();
+
+  // This thread blocks for the lifetime of the compositor: `run_pipeline` runs a GLib main loop
+  // until the pipeline reaches EOS (StopStreamEvent) or errors out.
+  std::thread([session_id, render_node, buffer_caps, display_mode, gst_contexts, on_ready, event_bus]() {
+    streaming::start_video_producer(std::to_string(session_id),
+                                    buffer_caps,
+                                    render_node,
+                                    {.width = display_mode.width,
+                                     .height = display_mode.height,
+                                     .refreshRate = display_mode.refreshRate},
+                                    gst_contexts,
+                                    on_ready,
+                                    event_bus);
   }).detach();
 }
 
