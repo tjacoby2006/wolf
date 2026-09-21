@@ -140,7 +140,8 @@ void MoonlightLobbyRuntime::start_runner(const std::string &render_node) {
     self->post(LobbyRunnerStarted{});
 
     // The lobby is now up: fulfil the promise the API waits on so lobby creation returns.
-    if (settings->on_setup_over) {
+    // `on_setup_over` is an rfl::Skip wrapper, so unwrap it with `.get()`.
+    if (settings->on_setup_over.get()) {
       settings->on_setup_over.get()->set_value(true);
     }
 
