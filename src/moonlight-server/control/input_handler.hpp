@@ -48,4 +48,21 @@ void controller_motion(const CONTROLLER_MOTION_PACKET &pkt, events::StreamSessio
 
 void controller_battery(const CONTROLLER_BATTERY_PACKET &pkt, events::StreamSession &session);
 
+/**
+ * Create a virtual joypad of the type the client asked for (or the configured override) and record
+ * it in the session, firing a PlugDeviceEvent. Returns the new pad, or null on failure.
+ */
+std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSession &session,
+                                                       immer::box<std::shared_ptr<ENetPeer>> connected_client,
+                                                       int controller_number,
+                                                       CONTROLLER_TYPE requested_type,
+                                                       uint8_t capabilities);
+
+/**
+ * Create a virtual pen tablet / touch screen and record it in the session, firing a PlugDeviceEvent.
+ * Returns false if the device could not be created.
+ */
+bool create_pen_tablet(events::StreamSession &session);
+bool create_touch_screen(events::StreamSession &session);
+
 } // namespace control
