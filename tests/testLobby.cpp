@@ -1,10 +1,32 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <session/lobby_actor.hpp>
 #include <session/lobby_model.hpp>
 
 using namespace wolf::session;
 
 namespace {
+
+/** A runtime that reacts to effects by feeding inputs back, like the real runtime does. */
+class AutoPilotLobbyRuntime : public LobbyRuntime {
+public:
+  void execute(const LobbyEffect &effect) override {
+    std::visit(
+        [this](const auto &e) {
+          using T = std::decay_t<decltype(e)>;
+          if constexpr (std::is_same_v<T, AssignLobbyGpu>) {
+            post(LobbyGpuAssigned{.render_node = "/dev/dri/renderD128"});
+          } else if constexpr (std::is_same_v<T, StartLobbyDesktop>) {
+            post(LobbyDesktopReady{.wayland_socket_name = "wayland-1"});
+          } else if constexpr (std::is_same_v<T, StartLobbyRunner>) {
+            post(LobbyRunnerStarted{});
+          } else if constexpr (std::is_same_v<T, TeardownLobby>) {
+            post(LobbyTeardownComplete{});
+          }
+        },
+        effect);
+  }
+};
 
 LobbyModel new_lobby(std::string id = "lobby-1", bool multi_user = true, bool stop_when_empty = true) {
   LobbyModel model;
@@ -170,4 +192,35 @@ TEST_CASE("terminal lobby states never transition again", "[lobby]") {
   t = step_lobby(model, StopLobby{.reason = "again"});
   REQUIRE(t.model.state == LobbyState::Failed);
   REQUIRE(t.effects.empty());
+}
+
+TEST_CASE("lobby actor drives the machine on its own thread", "[lobby]") {
+  auto runtime = std::make_shared<AutoPilotLobbyRuntime>();
+  // The actor must be owned by a shared_ptr: it hands the runtime a weak reference to itself.
+  auto actor = std::make_shared<LobbyActor>(new_lobby(), runtime);
+  actor->start();
+
+  // Only StartLobby is posted externally; the runtime drives the rest.
+  actor->post(StartLobby{});
+
+  for (int i = 0; i < 100 && actor->snapshot().state != LobbyState::RunnerRunning; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(actor->snapshot().state == LobbyState::RunnerRunning);
+
+  // A session joins and leaves the running lobby.
+  actor->post(SessionJoined{.session_id = 10});
+  for (int i = 0; i < 100 && actor->snapshot().connected_sessions.empty(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(actor->snapshot().connected_sessions.size() == 1);
+
+  actor->post(SessionLeft{.session_id = 10});
+  for (int i = 0; i < 100 && actor->snapshot().state != LobbyState::Stopped; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  // stop_when_everyone_leaves defaults to true, so the lobby stops itself.
+  REQUIRE(actor->snapshot().state == LobbyState::Stopped);
+
+  actor->stop();
 }

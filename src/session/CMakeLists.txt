@@ -12,6 +12,8 @@ target_sources(wolf_session
         lobby_machine.cpp
 
         PUBLIC
+        actor.hpp
+        lobby_actor.hpp
         lobby_effect.hpp
         lobby_input.hpp
         lobby_model.hpp
