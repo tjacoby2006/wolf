@@ -175,20 +175,14 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
 /**
  * @brief here's where the magic starts
  */
-void run() {
-  streaming::init(); // Need to initialise gstreamer once
-  control::init();   // Need to initialise enet once
-  docker::init();    // Need to initialise libcurl once
-  gst_video_context::init();
-
-  auto runtime_dir = utils::get_env("XDG_RUNTIME_DIR", "/tmp/sockets");
-  logs::log(logs::debug, "XDG_RUNTIME_DIR={}", runtime_dir);
-
-  auto config_file = utils::get_env("WOLF_CFG_FILE", "config.toml");
-  auto p_key_file = utils::get_env("WOLF_PRIVATE_KEY_FILE", "key.pem");
-  auto p_cert_file = utils::get_env("WOLF_PRIVATE_CERT_FILE", "cert.pem");
-  auto local_state = initialize(config_file, p_key_file, p_cert_file);
-
+/**
+ * Start every network-facing server (HTTP, HTTPS, RTSP, control, RTP ping, the Wolf API and mDNS)
+ * on its own detached thread. Returns immediately; the servers run for the process lifetime.
+ */
+static void start_servers(const immer::box<state::AppState> &local_state,
+                          const std::string &runtime_dir,
+                          const std::string &p_key_file,
+                          const std::string &p_cert_file) {
   // HTTP APIs
   std::thread([local_state]() {
     HttpServer server = HttpServer();
@@ -217,6 +211,7 @@ void run() {
   rtp::start_rtp_ping(state::get_port(state::VIDEO_PING_PORT),
                       state::get_port(state::AUDIO_PING_PORT),
                       local_state->event_bus);
+
   // Wolf API server
   std::thread([local_state, runtime_dir]() { wolf::api::start_server(runtime_dir, local_state); }).detach();
 
@@ -237,26 +232,14 @@ void run() {
       logs::log(logs::error, "mDNS error: {}", e.what());
     }
   }).detach();
+}
 
-  auto audio_server = setup_audio_server(local_state->host->host_xdg_runtime_dir, runtime_dir);
-  // PulseAudio sink-input router (hostname -> session_id -> virtual_sink_<session>)
-  auto pulse_router_state = std::make_shared<audio::PulseAudioRouterState>(audio_server->server);
-  auto pulse_router_handlers = audio::setup_pulseaudio_router_handlers(local_state, pulse_router_state);
-  // Setup event handlers for Moonlight related events (Start/Stop stream, hotplug, etc)
-  auto moonlight_sess_handlers = sessions::setup_moonlight_handlers(local_state, runtime_dir, audio_server);
-  // Setup event handlers for player Lobbies
-  auto lobbies_handlers = sessions::setup_lobbies_handlers(local_state, runtime_dir, audio_server);
-
-  // Park the main thread until a termination signal arrives. supervisord sends
-  // SIGINT on container stop (stopsignal=INT) and waits stopwaitsecs for us to
-  // exit, so we use that window to tear everything down cleanly.
-  while (!shutdown_requested.load(std::memory_order_relaxed)) {
-    std::this_thread::sleep_for(200ms);
-  }
-
-  logs::log(logs::info, "Received shutdown signal, stopping all sessions and lobbies");
-
-  // Stop lobbies first: each one makes its connected sessions leave gracefully.
+/**
+ * Stop every lobby and stream session, then wait (bounded) for the state to drain.
+ *
+ * Lobbies are stopped first: each one makes its connected sessions leave gracefully.
+ */
+static void stop_all_sessions(const immer::box<state::AppState> &local_state) {
   for (const auto &lobby : local_state->lobbies->load().get()) {
     local_state->event_bus->fire_event(
         immer::box<events::StopLobbyEvent>(events::StopLobbyEvent{.lobby_id = lobby.id}));
@@ -275,7 +258,42 @@ void run() {
        i++) {
     std::this_thread::sleep_for(100ms);
   }
+}
 
+void run() {
+  streaming::init(); // Need to initialise gstreamer once
+  control::init();   // Need to initialise enet once
+  docker::init();    // Need to initialise libcurl once
+  gst_video_context::init();
+
+  auto runtime_dir = utils::get_env("XDG_RUNTIME_DIR", "/tmp/sockets");
+  logs::log(logs::debug, "XDG_RUNTIME_DIR={}", runtime_dir);
+
+  auto config_file = utils::get_env("WOLF_CFG_FILE", "config.toml");
+  auto p_key_file = utils::get_env("WOLF_PRIVATE_KEY_FILE", "key.pem");
+  auto p_cert_file = utils::get_env("WOLF_PRIVATE_CERT_FILE", "cert.pem");
+  auto local_state = initialize(config_file, p_key_file, p_cert_file);
+
+  start_servers(local_state, runtime_dir, p_key_file, p_cert_file);
+
+  auto audio_server = setup_audio_server(local_state->host->host_xdg_runtime_dir, runtime_dir);
+  // PulseAudio sink-input router (hostname -> session_id -> virtual_sink_<session>)
+  auto pulse_router_state = std::make_shared<audio::PulseAudioRouterState>(audio_server->server);
+  auto pulse_router_handlers = audio::setup_pulseaudio_router_handlers(local_state, pulse_router_state);
+  // Setup event handlers for Moonlight related events (Start/Stop stream, hotplug, etc)
+  auto moonlight_sess_handlers = sessions::setup_moonlight_handlers(local_state, runtime_dir, audio_server);
+  // Setup event handlers for player Lobbies
+  auto lobbies_handlers = sessions::setup_lobbies_handlers(local_state, runtime_dir, audio_server);
+
+  // Park the main thread until a termination signal arrives. supervisord sends
+  // SIGINT on container stop (stopsignal=INT) and waits stopwaitsecs for us to
+  // exit, so we use that window to tear everything down cleanly.
+  while (!shutdown_requested.load(std::memory_order_relaxed)) {
+    std::this_thread::sleep_for(200ms);
+  }
+
+  logs::log(logs::info, "Received shutdown signal, stopping all sessions and lobbies");
+  stop_all_sessions(local_state);
   logs::log(logs::info, "Graceful shutdown complete");
 }
 
