@@ -1,6 +1,8 @@
 #include <immer/vector_transient.hpp>
+#include <session/lobby_actor.hpp>
 #include <sessions/common.hpp>
 #include <sessions/handlers.hpp>
+#include <sessions/lobby_runtime.hpp>
 #include <state/config.hpp>
 #include <state/data-structures.hpp>
 #include <state/sessions.hpp>
@@ -8,61 +10,8 @@
 
 namespace wolf::core::sessions {
 
-/**
- * @brief Removes the StreamSession from the input Lobby and switches everything to the original session
- *
- * @note Leaving a lobby may have side effects,
- * like terminating the lobby if it becomes empty or triggering additional events.
- */
-void leave_lobby(const std::shared_ptr<events::EventBusType> &ev_bus,
-                 const events::Lobby &lobby,
-                 const events::StreamSession &session) {
-  logs::log(logs::info, "[LOBBY] Session {} leaving lobby {}", session.session_id, lobby.id);
-  // Remove the current session from the lobby list
-  lobby.connected_sessions->update([session](const immer::vector<immer::box<std::string>> &connected_sessions) {
-    return connected_sessions | //
-           ranges::views::filter([session](const immer::box<std::string> &session_id) {
-             return *session_id != std::to_string(session.session_id);
-           }) | //
-           ranges::to<immer::vector<immer::box<std::string>>>();
-  });
-
-  // Switch over mouse and keyboard to use the original session wayland server
-  auto wl_state = session.wayland_display->load();
-  session.mouse->emplace(virtual_display::WaylandMouse(wl_state));
-  session.keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
-  session.touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
-
-  // Switch over all joypads present in the lobby back into the original session
-  events::JoypadList joypads = session.joypads->load();
-  for (auto [_joypad_nr, joypad] : joypads) {
-    // Plug them into original session
-    events::PlugDeviceEvent plug_ev{.session_id = std::to_string(session.session_id)};
-    std::visit(
-        [&plug_ev](auto &pad) {
-          plug_ev.udev_events = pad.get_udev_events();
-          plug_ev.udev_hw_db_entries = pad.get_udev_hw_db_entries();
-        },
-        *joypad);
-    ev_bus->fire_event(immer::box<events::PlugDeviceEvent>(plug_ev));
-    // Unplug them from the current lobby
-    ev_bus->fire_event(immer::box<events::UnplugDeviceEvent>{
-        events::UnplugDeviceEvent{.session_id = lobby.id,
-                                  .udev_events = plug_ev.udev_events,
-                                  .udev_hw_db_entries = plug_ev.udev_hw_db_entries}});
-  }
-  // TODO: hotplug pen_tablet and touch_screen
-
-  // Switch audio/video gstreamer stream producers
-  ev_bus->fire_event(immer::box<events::SwitchStreamProducerEvents>{
-      events::SwitchStreamProducerEvents{.session_id = session.session_id,
-                                         .interpipe_src_id = std::to_string(session.session_id)}});
-
-  if (lobby.stop_when_everyone_leaves && lobby.connected_sessions->load()->size() == 0) {
-    // Nobody left in the lobby, and it's set to stop when everyone leaves
-    ev_bus->fire_event(immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby.id}});
-  }
-}
+/** Live lobby actors, keyed by lobby id. Keeps them alive for the lobby's lifetime. */
+using lobby_actor_map = immer::map<std::string, std::shared_ptr<wolf::session::LobbyActor>>;
 
 immer::vector<immer::box<events::EventBusHandlers>>
 setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
@@ -70,165 +19,56 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                        const std::optional<AudioServer> &audio_server) {
   immer::vector_transient<immer::box<events::EventBusHandlers>> handlers;
 
-  auto gpu_balancer = app_state->gpu_balancer;
+  auto active_lobby_actors = std::make_shared<immer::atom<lobby_actor_map>>();
 
-  // On create lobby event
+  // On create lobby event: hand the lobby to a LobbyActor, which owns the whole lifecycle.
+  // The actor drives GPU assignment, the shared compositor, the runner and teardown as one linear
+  // state machine (see src/session/lobby_*), instead of the old web of detached handlers.
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::CreateLobbyEvent>>(
-      [=, gpu_balancer](const immer::box<events::CreateLobbyEvent> &lobby_settings) {
-        logs::log(logs::info, "[LOBBY] Creating new lobby");
-        auto ev_bus = app_state->event_bus;
+      [=](const immer::box<events::CreateLobbyEvent> &lobby_settings) {
+        logs::log(logs::info, "[LOBBY] Creating new lobby {}", lobby_settings->id);
 
-        /* Assign a GPU to this lobby once at creation (pinned if the creating session's app requests one,
-         * otherwise load-balanced). All joining clients share this GPU; it is released when the lobby stops. */
-        {
-          std::string usage_str;
-          for (const auto &[node, count] : gpu_balancer->load()->usage) {
-            if (!usage_str.empty())
-              usage_str += ", ";
-            usage_str += node + "=" + std::to_string(count);
-          }
-          logs::log(logs::info, "[LOBBY] GPU balancer before pick (lobby {}): {}", lobby_settings->id, usage_str.empty() ? "(none)" : usage_str);
-        }
-        auto chosen = gpu_balancer->load()->pick(std::nullopt);
-        logs::log(logs::info, "[LOBBY] Picked GPU {} for lobby {}", chosen.has_value() ? *chosen : "<none>", lobby_settings->id);
-        // The pool is discovered at startup and can go stale (GPU reset, driver reload, ...).
-        // Handing a dead node to the virtual compositor makes it panic and abort Wolf, so probe first.
-        if (chosen.has_value() && !is_render_node_available(*chosen)) {
-          logs::log(logs::error, "[LOBBY] Assigned GPU {} is not available for lobby {}", *chosen, lobby_settings->id);
-          gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.release(node); });
-          chosen.reset();
-        }
-        if (!chosen.has_value()) {
-          logs::log(logs::error, "[LOBBY] No available GPU for lobby {}", lobby_settings->id);
-          // Defer to a detached thread to avoid a nested fire_event under the same shared_lock,
-          // which can race with concurrent handlers modifying gpu_balancer / lobbies atoms.
-          auto lobby_id = lobby_settings->id;
-          std::thread([ev_bus, lobby_id]() {
-            ev_bus->fire_event(immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby_id}});
-          }).detach();
-          return;
-        }
+        auto lobby = std::make_shared<events::Lobby>(events::Lobby{.id = lobby_settings->id,
+                                                                   .name = lobby_settings->name,
+                                                                   .started_by_profile_id = lobby_settings->profile_id,
+                                                                   .icon_png_path = lobby_settings->icon_png_path,
+                                                                   .multi_user = lobby_settings->multi_user,
+                                                                   .pin = lobby_settings->pin,
+                                                                   .stop_when_everyone_leaves =
+                                                                       lobby_settings->stop_when_everyone_leaves,
+                                                                   .runner = lobby_settings->runner});
 
-        auto lobby = std::make_shared<events::Lobby>(
-            events::Lobby{.id = lobby_settings->id,
-                          .name = lobby_settings->name,
-                          .started_by_profile_id = lobby_settings->profile_id,
-                          .icon_png_path = lobby_settings->icon_png_path,
-                          .multi_user = lobby_settings->multi_user,
-                          .pin = lobby_settings->pin,
-                          .stop_when_everyone_leaves = lobby_settings->stop_when_everyone_leaves,
-                          .runner = lobby_settings->runner,
-                          .assigned_render_node = *chosen});
-        gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.acquire(node); });
+        // Publish the lobby immediately so joins can find it while it is still starting up.
         app_state->lobbies->update(
             [lobby](const immer::vector<events::Lobby> &lobbies) { return lobbies.push_back(*lobby); });
 
-        { // Start Wayland compositor and Gstreamer producer pipeline
-          logs::log(logs::debug, "[LOBBY] Create wayland compositor");
+        wolf::session::LobbyModel model;
+        model.lobby_id = lobby->id;
+        model.width = lobby_settings->video_settings.width;
+        model.height = lobby_settings->video_settings.height;
+        model.refresh_rate = lobby_settings->video_settings.refresh_rate;
+        model.multi_user = lobby->multi_user;
+        model.stop_when_everyone_leaves = lobby->stop_when_everyone_leaves;
 
-          std::shared_ptr<boost::promise<streaming::WaylandDisplayReady>> on_ready =
-              std::make_shared<boost::promise<streaming::WaylandDisplayReady>>();
+        auto context = LobbyContext{.app_state = app_state,
+                                    .lobby = lobby,
+                                    .settings = std::make_shared<events::CreateLobbyEvent>(*lobby_settings),
+                                    .runtime_dir = runtime_dir,
+                                    .audio_server = audio_server};
+        auto runtime = std::make_shared<MoonlightLobbyRuntime>(std::move(context));
 
-          std::thread([lobby, lobby_settings, ev_bus, on_ready, gst_contexts = app_state->gst_contexts]() {
-            streaming::start_video_producer(lobby->id,
-                                            lobby_settings->video_settings.video_producer_buffer_caps,
-                                            lobby->assigned_render_node.empty()
-                                                ? lobby_settings->video_settings.wayland_render_node
-                                                : lobby->assigned_render_node,
-                                            {.width = lobby_settings->video_settings.width,
-                                             .height = lobby_settings->video_settings.height,
-                                             .refreshRate = lobby_settings->video_settings.refresh_rate},
-                                            gst_contexts,
-                                            on_ready,
-                                            ev_bus);
-          }).detach();
+        auto actor = std::make_shared<wolf::session::LobbyActor>(std::move(model), runtime);
+        actor->start();
 
-          auto w_display_ready = on_ready->get_future().then(
-              [lobby, runtime_dir, ev_bus, audio_server, lobby_settings, host = app_state->host](auto fut) {
-                streaming::WaylandDisplayReady ready = fut.get();
+        // Kick off the lifecycle. The runtime feeds the rest of the inputs back as effects complete.
+        actor->post(wolf::session::StartLobby{});
 
-                auto wl_state =
-                    virtual_display::create_wayland_display(ready.wayland_plugin, ready.wayland_socket_name);
-                // Set the wayland display
-                lobby->wayland_display->store(wl_state);
-
-                if (!wait_for_wayland_socket(runtime_dir, ready.wayland_socket_name)) {
-                  logs::log(logs::error,
-                            "[LOBBY] Wayland socket {} was not ready, aborting runner startup",
-                            ready.wayland_socket_name);
-                  ev_bus->fire_event(immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby->id}});
-                  return;
-                }
-
-                { // Start runner
-                  logs::log(logs::debug, "[LOBBY] Start runner");
-                  auto full_path = std::filesystem::path(host->local_base_state_folder) /
-                                   lobby_settings->runner_state_folder;
-                  logs::log(logs::debug, "Host app state folder: {}, creating paths", full_path.string());
-                  std::filesystem::create_directories(full_path);
-
-                  std::thread([=]() {
-                    auto assigned_node = lobby->assigned_render_node.empty()
-                                             ? lobby_settings->video_settings.wayland_render_node
-                                             : lobby->assigned_render_node;
-                    start_runner(lobby->runner,
-                                 lobby->plugged_devices_queue,
-                                 immer::box<RunnerArgs>{RunnerArgs{
-                                     .session_id = lobby->id,
-                                     .video_settings =
-                                         events::VideoSettings{.width = lobby_settings->video_settings.width,
-                                                               .height = lobby_settings->video_settings.height,
-                                                               .refresh_rate = lobby_settings->video_settings.refresh_rate,
-                                                               .wayland_render_node = assigned_node,
-                                                               .runner_render_node = assigned_node,
-                                                               .video_producer_buffer_caps =
-                                                                   lobby_settings->video_settings.video_producer_buffer_caps},
-                                     .wayland_display = lobby->wayland_display->load(),
-                                     .audio_server = audio_server,
-                                     .audio_sink = lobby->audio_sink->load(),
-                                     .host = host,
-                                     .app_local_state_folder = full_path.string(),
-                                     .app_host_state_folder = std::filesystem::path(host->host_base_state_folder) /
-                                                              lobby_settings->runner_state_folder,
-                                     .xdg_runtime_dir = runtime_dir,
-                                     .client_settings = lobby_settings->client_settings}});
-                    // Runner process ended, stop the lobby
-                    lobby->wayland_display->store(nullptr);
-
-                    ev_bus->fire_event<immer::box<events::StopLobbyEvent>>(
-                        immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby->id}});
-                  }).detach();
-                }
-
-                lobby_settings->on_setup_over.get()->set_value(true);
-              });
-        }
-
-        { // Create audio virtual sink
-          logs::log(logs::debug, "[LOBBY] Create audio virtual sink");
-          auto pulse_sink_name = fmt::format("{}{}", VIRTUAL_SINK_PREFIX, lobby->id);
-          if (audio_server && audio_server->server) {
-            auto channel_count = lobby_settings->audio_settings.channel_count;
-            auto v_device = audio::create_virtual_sink(
-                audio_server->server,
-                audio::AudioDevice{.sink_name = pulse_sink_name, .mode = state::get_audio_mode(channel_count, true)});
-
-            lobby->audio_sink->store(v_device);
-
-            // Start Gstreamer producer pipeline
-            std::thread([lobby, audio_server = audio_server->server, ev_bus, channel_count]() {
-              auto sink_name = fmt::format("{}{}.monitor", VIRTUAL_SINK_PREFIX, lobby->id);
-              streaming::start_audio_producer(lobby->id,
-                                              ev_bus,
-                                              channel_count,
-                                              sink_name,
-                                              audio::get_server_name(audio_server));
-            }).detach();
-          }
-        }
+        // Keep the actor alive for the lobby's lifetime; it stops itself on a terminal state.
+        active_lobby_actors->update([id = lobby->id, actor](const auto &actors) { return actors.set(id, actor); });
       }));
 
-  // When a Moonlight client joins a lobby
+  // When a Moonlight client joins a lobby: route the join to the lobby's actor, which owns the
+  // attach logic (device migration, input/audio/video switch) as part of its state machine.
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::JoinLobbyEvent>>(
       [=](const immer::box<events::JoinLobbyEvent> &join_lobby_event) {
         auto lobbies = app_state->lobbies->load();
@@ -244,103 +84,53 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           join_lobby_event->error_message.get()->set_value("Lobby or session not found");
           return;
         }
-        logs::log(logs::info, "[LOBBY] Session {} joining lobby {}", session->session_id, lobby->id);
 
-        if (!lobby->multi_user && lobby->connected_sessions->load()->size() >= 1) {
-          logs::log(logs::error, "[LOBBY] Lobby {} is full", lobby->id);
-          join_lobby_event->error_message.get()->set_value("Lobby is full");
+        auto actor = active_lobby_actors->load()->find(lobby->id);
+        if (!actor) {
+          logs::log(logs::error, "[LOBBY] No actor for lobby {}", lobby->id);
+          join_lobby_event->error_message.get()->set_value("Lobby is not ready");
           return;
         }
 
-        // Migrate joypads BEFORE adding the session to connected_sessions, or the relayed unplug races the queued plug
-        events::JoypadList joypads = session->joypads->load();
-        for (auto [_joypad_nr, joypad] : joypads) {
-          events::PlugDeviceEvent plug_ev{.session_id = lobby->id};
-          std::visit(
-              [&plug_ev](auto &pad) {
-                plug_ev.udev_events = pad.get_udev_events();
-                plug_ev.udev_hw_db_entries = pad.get_udev_hw_db_entries();
-              },
-              *joypad);
-          // Unplug it from the current session's runner
-          app_state->event_bus->fire_event(immer::box<events::UnplugDeviceEvent>{
-              events::UnplugDeviceEvent{.session_id = std::to_string(session->session_id),
-                                        .udev_events = plug_ev.udev_events,
-                                        .udev_hw_db_entries = plug_ev.udev_hw_db_entries}});
-
-          // Add it to the lobby runner's devices queue, addressed to the lobby id
-          // (same routing the PlugDeviceEvent relay performs for connected sessions)
-          lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>{plug_ev});
-        }
-        // TODO: hotplug pen_tablet
-
-        // Update the lobby with the new session
-        lobby->connected_sessions->update([session](const immer::vector<immer::box<std::string>> &connected_sessions) {
-          return connected_sessions.push_back({std::to_string(session->session_id)});
-        });
-
-        // switch mouse and keyboard in session to use the lobby wayland server
-        auto wl_state = lobby->wayland_display->load();
-        session->mouse->emplace(virtual_display::WaylandMouse(wl_state));
-        session->keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
-        session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
-
-        // Switch audio/video gstreamer stream producers
-        app_state->event_bus->fire_event(immer::box<events::SwitchStreamProducerEvents>{
-            events::SwitchStreamProducerEvents{.session_id = session->session_id, .interpipe_src_id = lobby->id}});
+        // The actor decides whether the join is allowed (single-user lobby, duplicate join, ...).
+        // We report success optimistically; the actor ignores an invalid join.
+        logs::log(logs::info, "[LOBBY] Session {} joining lobby {}", session->session_id, lobby->id);
+        (*actor)->post(wolf::session::SessionJoined{.session_id = session->session_id});
         join_lobby_event->error_message.get()->set_value("");
       }));
 
-  // When a Moonlight session leaves the lobby
+  // When a Moonlight session leaves the lobby: route the leave to the lobby's actor.
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::LeaveLobbyEvent>>(
       [=](const immer::box<events::LeaveLobbyEvent> &leave_lobby_event) {
         auto lobbies = app_state->lobbies->load();
         auto lobby = state::get_lobby_by_id(lobbies.get(), leave_lobby_event->lobby_id);
-        auto sessions = app_state->running_sessions->load();
-        auto session = state::get_session_by_id(sessions.get(), leave_lobby_event->moonlight_session_id);
-
-        if (!lobby || !session) {
-          logs::log(logs::error,
-                    "[LOBBY] Failed to leave lobby: lobby {} or session {} not found",
-                    leave_lobby_event->lobby_id,
-                    leave_lobby_event->moonlight_session_id);
-        } else {
-          leave_lobby(app_state->event_bus, lobby.value(), session.value());
+        if (!lobby) {
+          logs::log(logs::error, "[LOBBY] Failed to leave lobby: lobby {} not found", leave_lobby_event->lobby_id);
+          return;
+        }
+        if (auto actor = active_lobby_actors->load()->find(lobby->id)) {
+          (*actor)->post(wolf::session::SessionLeft{.session_id = leave_lobby_event->moonlight_session_id});
         }
       }));
 
-  // Stopping a lobby will trigger leave for all the connected sessions
+  // Stopping a lobby: route the stop to the lobby's actor, which detaches every connected session
+  // and tears the shared desktop down as part of its state machine.
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StopLobbyEvent>>(
       [=](const immer::box<events::StopLobbyEvent> &stop_lobby_event) {
-        auto lobbies = app_state->lobbies->load();
-        auto lobby = state::get_lobby_by_id(lobbies.get(), stop_lobby_event->lobby_id);
-
-        if (!lobby) {
-          logs::log(logs::warning, "[LOBBY] lobby {} not found", stop_lobby_event->lobby_id);
+        auto actor = active_lobby_actors->load()->find(stop_lobby_event->lobby_id);
+        if (!actor) {
+          logs::log(logs::warning, "[LOBBY] No actor for lobby {}", stop_lobby_event->lobby_id);
           return;
         }
         logs::log(logs::info, "[LOBBY] stopping lobby {}", stop_lobby_event->lobby_id);
-
-        // Release the GPU assigned to this lobby so it can be reused by the next app/lobby
-        if (!lobby->assigned_render_node.empty()) {
-          gpu_balancer->update(
-              [node = lobby->assigned_render_node](const state::GpuBalancer &bal) { return bal.release(node); });
-        }
-
-        immer::vector<immer::box<std::string>> sessions = lobby->connected_sessions->load();
-        for (auto &session_id : sessions) {
-          app_state->event_bus->fire_event(immer::box<events::LeaveLobbyEvent>{
-              events::LeaveLobbyEvent{.lobby_id = lobby->id, .moonlight_session_id = std::stoul(*session_id)}});
-        }
-
-        // Finally, remove the lobby from the app_state
-        app_state->lobbies->update([stop_lobby_event](const immer::vector<events::Lobby> &lobbies) {
-          return lobbies | //
-                 ranges::views::filter([stop_lobby_event](const events::Lobby &lobby) {
-                   return lobby.id != stop_lobby_event->lobby_id;
-                 }) | //
-                 ranges::to<immer::vector<events::Lobby>>();
-        });
+        (*actor)->post(wolf::session::StopLobby{.reason = "stop lobby event"});
+        // Drop our reference on a detached thread: destroying the actor joins its worker, and the
+        // worker's teardown fires events, so doing it inline here could deadlock the event bus.
+        auto actors = active_lobby_actors;
+        auto lobby_id = stop_lobby_event->lobby_id;
+        std::thread([actors, lobby_id]() {
+          actors->update([lobby_id](const auto &map) { return map.erase(lobby_id); });
+        }).detach();
       }));
 
   // On a PlugDeviceEvent, we have to add the device to the lobby queue so that the runner will pick it up

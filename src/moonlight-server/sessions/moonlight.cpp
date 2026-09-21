@@ -67,7 +67,13 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         // device queue cleanup) and will run it as part of its state machine.
         if (auto actor = active_actors->load()->find(ev->session_id)) {
           (*actor)->post(wolf::session::StopRequested{.reason = "stop stream event"});
-          active_actors->update([id = ev->session_id](const auto &actors) { return actors.erase(id); });
+          // Drop our reference on a detached thread: destroying the actor joins its worker, and the
+          // worker's teardown fires events, so doing it inline here could deadlock the event bus.
+          auto actors = active_actors;
+          auto session_id = ev->session_id;
+          std::thread([actors, session_id]() {
+            actors->update([session_id](const auto &map) { return map.erase(session_id); });
+          }).detach();
           return;
         }
 

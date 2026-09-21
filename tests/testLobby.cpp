@@ -147,6 +147,27 @@ TEST_CASE("the lobby survives an empty room when configured to", "[lobby]") {
   REQUIRE(has<DetachSession>(t.effects));
 }
 
+TEST_CASE("stopping a lobby detaches every connected session first", "[lobby]") {
+  auto model = running_lobby();
+  model = advance_lobby(model, SessionJoined{.session_id = 10});
+  model = advance_lobby(model, SessionJoined{.session_id = 20});
+
+  auto t = step_lobby(model, StopLobby{.reason = "shutdown"});
+  REQUIRE(t.model.state == LobbyState::Stopping);
+  REQUIRE(has<TeardownLobby>(t.effects));
+  REQUIRE(has<ReleaseLobbyGpu>(t.effects));
+
+  // Both sessions are detached before the teardown.
+  std::size_t detaches = 0;
+  for (const auto &effect : t.effects) {
+    if (std::holds_alternative<DetachSession>(effect)) {
+      ++detaches;
+    }
+  }
+  REQUIRE(detaches == 2);
+  REQUIRE(std::holds_alternative<DetachSession>(t.effects.front()));
+}
+
 TEST_CASE("runner exit stops the lobby", "[lobby]") {
   auto model = running_lobby();
 

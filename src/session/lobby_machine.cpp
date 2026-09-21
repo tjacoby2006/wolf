@@ -32,6 +32,21 @@ LobbyTransition stop(const LobbyModel &model, std::string reason) {
                          .effects = teardown_effects(model.lobby_id, std::move(reason))};
 }
 
+/**
+ * Move to `Stopping`, first detaching every connected session (so their input/audio/video is
+ * switched back to their own desktop) and then tearing the shared desktop down.
+ */
+LobbyTransition stop_with_detach(const LobbyModel &model, std::string reason) {
+  auto transition = stop(model, std::move(reason));
+  std::vector<LobbyEffect> detaches;
+  detaches.reserve(model.connected_sessions.size());
+  for (auto session_id : model.connected_sessions) {
+    detaches.push_back(DetachSession{.lobby_id = model.lobby_id, .session_id = session_id});
+  }
+  transition.effects.insert(transition.effects.begin(), detaches.begin(), detaches.end());
+  return transition;
+}
+
 /** No-op transition: ignore an input that is not valid in the current state. */
 LobbyTransition ignore(const LobbyModel &model) {
   return LobbyTransition{.model = model, .effects = {}};
@@ -56,9 +71,10 @@ LobbyTransition step_lobby(const LobbyModel &model, const LobbyInput &input) {
     return ignore(model);
   }
 
-  // A stop request is valid from any non-terminal state and always wins.
+  // A stop request is valid from any non-terminal state and always wins. Every connected session
+  // is detached first so its input/audio/video is switched back before the desktop goes away.
   if (std::holds_alternative<StopLobby>(input)) {
-    return stop(model, std::get<StopLobby>(input).reason);
+    return stop_with_detach(model, std::get<StopLobby>(input).reason);
   }
 
   // A desktop failure is fatal from any state that is still waiting on the compositor.
