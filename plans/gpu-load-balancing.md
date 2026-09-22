@@ -80,6 +80,14 @@ weights/exclusions. The default `WOLF_RENDER_NODE` is always included so single-
 - **Lobby**: in the [`CreateLobbyEvent` handler](src/moonlight-server/sessions/lobbies.cpp:74), acquire once
   using the creating app's pin; store on the `Lobby`. Release in the
   [`StopLobbyEvent` handler](src/moonlight-server/sessions/lobbies.cpp:266). Joining clients do not re-acquire.
+  - **GPU affinity (implemented)**: a lobby must render on the same GPU as the session that is driving it,
+    otherwise the session's *already-created* encoder is fed frames from a different GPU and fails. The
+    `CreateLobbyRequest` therefore carries an optional `session_id`; the API resolves that session's
+    `assigned_render_node` (falling back to `app->render_node`) into a new
+    `CreateLobbyEvent.preferred_render_node`. `MoonlightLobbyRuntime::assign_gpu` calls
+    `GpuBalancer::pick_preferring(preferred_render_node)`, which uses the preferred node when it is
+    available and otherwise logs a warning and falls back to normal load balancing. When no `session_id`
+    is supplied (e.g. an app still starting), the lobby load-balances as before.
 
 ### Per-GPU container scoping (the correctness crux)
 Today [`RunDocker::run`](src/moonlight-server/runners/docker.cpp:86) sets `NVIDIA_VISIBLE_DEVICES=all` and

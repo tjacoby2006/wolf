@@ -179,6 +179,16 @@ struct CreateLobbyEvent {
   std::shared_ptr<Runner> runner;
 
   /**
+   * The render node (GPU) the lobby should use, if known.
+   *
+   * The lobby's frames are consumed by the encoder of the session that created it, and that encoder's
+   * GPU is fixed when the session goes to RTSP PLAY. Rendering on a different node makes the encoder
+   * read GPU memory it can't address, so the lobby should inherit the creating session's node here.
+   * When empty, the lobby falls back to load balancing.
+   */
+  std::optional<std::string> preferred_render_node = std::nullopt;
+
+  /**
    * A promise to know when the lobby is up and running
    */
   rfl::Skip<std::shared_ptr<std::promise<bool>>> on_setup_over = std::make_shared<std::promise<bool>>();

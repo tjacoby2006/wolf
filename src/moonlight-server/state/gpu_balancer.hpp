@@ -75,6 +75,25 @@ struct GpuBalancer {
     return best;
   }
 
+  /**
+   * Like `pick` but treats `preferred_node` as a soft pin: use it when it's in the pool and not
+   * excluded, otherwise fall back to load balancing.
+   *
+   * This is what a lobby uses to stay on the GPU of the session that created it (so the session's
+   * encoder can read the lobby's frames) without breaking when that GPU is unavailable.
+   */
+  std::optional<std::string> pick_preferring(const std::optional<std::string> &preferred_node) const {
+    if (preferred_node.has_value()) {
+      if (is_available(*preferred_node)) {
+        return *preferred_node;
+      }
+      logs::log(logs::warning,
+                "Preferred GPU {} is not in the pool or is excluded, falling back to load balancing",
+                *preferred_node);
+    }
+    return pick(std::nullopt);
+  }
+
   /** Increment the active-container count for `node`. Returns a new snapshot. */
   GpuBalancer acquire(const std::string &node) const {
     auto next = *this;

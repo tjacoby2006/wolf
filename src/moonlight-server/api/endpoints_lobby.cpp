@@ -27,6 +27,23 @@ void UnixSocketServer::endpoint_LobbyCreate(const wolf::api::HTTPRequest &req, s
     auto default_client_settings = state::ClientSettings{};
     auto client_settings = event.value().client_settings.value().value_or(PartialClientSettings{});
     auto lobby_id = state::gen_uuid();
+
+    // The lobby's frames are consumed by the creating session's encoder, whose GPU is fixed at RTSP
+    // PLAY. Resolve that node here so the lobby renders on the same GPU (see `CreateLobbyEvent`).
+    std::optional<std::string> preferred_render_node = std::nullopt;
+    if (auto session_id = event.value().session_id.get(); session_id.has_value() && !session_id->empty()) {
+      auto session = state::get_session_by_id(this->state_->app_state->running_sessions->load(),
+                                              std::stoul(*session_id));
+      if (!session) {
+        logs::log(logs::warning, "[API] Invalid session_id for lobby creation: {}", *session_id);
+        send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "Invalid session_id"}));
+        return;
+      }
+      // Mirror the encode-side fallback: an unassigned session still has an app render node.
+      preferred_render_node =
+          session->assigned_render_node.empty() ? session->app->render_node : session->assigned_render_node;
+    }
+
     auto create_lobby_ev = events::CreateLobbyEvent{
         .id = lobby_id,
         .profile_id = event.value().profile_id.get(),
@@ -52,7 +69,8 @@ void UnixSocketServer::endpoint_LobbyCreate(const wolf::api::HTTPRequest &req, s
                 .motion_controller_override = client_settings.motion_controller_override.value_or(
                     default_client_settings.motion_controller_override)},
         .runner_state_folder = event.value().runner_state_folder,
-        .runner = state::get_runner(event.value().runner, this->state_->app_state->event_bus)};
+        .runner = state::get_runner(event.value().runner, this->state_->app_state->event_bus),
+        .preferred_render_node = preferred_render_node};
     // Fire the event
     state_->app_state->event_bus->fire_event(immer::box<events::CreateLobbyEvent>(create_lobby_ev));
 

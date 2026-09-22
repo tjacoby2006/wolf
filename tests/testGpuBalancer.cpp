@@ -118,3 +118,30 @@ TEST_CASE("GpuBalancer::from_pool builds the pool from config", "[gpu_balancer]"
     REQUIRE(balancer.pool.at("/dev/dri/renderD128").weight == 1);
   }
 }
+
+TEST_CASE("GpuBalancer::pick_preferring uses the preferred node when possible", "[gpu_balancer]") {
+  auto balancer = make_balancer();
+
+  SECTION("no preference falls back to load balancing") {
+    REQUIRE(balancer.pick_preferring(std::nullopt) == "/dev/dri/renderD128");
+  }
+
+  SECTION("a preferred node wins even when it is the busier one") {
+    // renderD136 is otherwise the idle GPU, but the caller asked for renderD128.
+    auto b = balancer.acquire("/dev/dri/renderD136");
+    REQUIRE(b.pick_preferring(std::optional<std::string>("/dev/dri/renderD128")) == "/dev/dri/renderD128");
+  }
+
+  SECTION("an unknown or excluded preferred node falls back to load balancing") {
+    REQUIRE(balancer.pick_preferring(std::optional<std::string>("/dev/dri/renderD999")) == "/dev/dri/renderD128");
+
+    auto excluded = make_balancer();
+    excluded.pool["/dev/dri/renderD128"].excluded = true;
+    REQUIRE(excluded.pick_preferring(std::optional<std::string>("/dev/dri/renderD128")) == "/dev/dri/renderD136");
+  }
+
+  SECTION("an empty pool still yields nullopt") {
+    GpuBalancer empty;
+    REQUIRE(empty.pick_preferring(std::optional<std::string>("/dev/dri/renderD128")).has_value() == false);
+  }
+}

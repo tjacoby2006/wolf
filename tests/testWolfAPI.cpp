@@ -692,6 +692,74 @@ TEST_CASE("Lobbies APIs", "[API]") {
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }
 
+// A lobby renders the frames that the creating session's encoder consumes, and that encoder's GPU is
+// fixed at RTSP PLAY. The lobby must therefore inherit the creating session's node, otherwise the
+// encoder ends up reading frames produced on a different GPU.
+TEST_CASE("Creating a lobby inherits the creating session's GPU", "[API]") {
+  auto event_bus = std::make_shared<events::EventBusType>();
+  auto running_sessions = std::make_shared<immer::atom<immer::vector<events::StreamSession>>>();
+  auto config = immer::box<state::Config>(state::load_or_default("config.test.toml", event_bus, running_sessions));
+
+  // A session (as started by wolf-ui) that has already been assigned a render node.
+  const std::size_t session_id = 4321;
+  running_sessions->update([session_id](const immer::vector<events::StreamSession> &sessions) {
+    return sessions.push_back(events::StreamSession{
+        .app = std::make_shared<events::App>(events::App{.base = moonlight::App{.title = "gpu_test_app"},
+                                                         .render_node = "/dev/dri/renderD136"}),
+        .assigned_render_node = "/dev/dri/renderD128",
+        .session_id = session_id});
+  });
+
+  auto app_state = immer::box<state::AppState>(state::AppState{
+      .config = config,
+      .pairing_cache = std::make_shared<immer::atom<immer::map<std::string, state::PairCache>>>(),
+      .pairing_atom = std::make_shared<immer::atom<immer::map<std::string, immer::box<events::PairSignal>>>>(),
+      .event_bus = event_bus,
+      .lobbies = std::make_shared<immer::atom<immer::vector<events::Lobby>>>(),
+      .running_sessions = running_sessions});
+
+  // Capture the event the endpoint emits instead of standing up a real compositor/runner.
+  std::optional<std::optional<std::string>> captured;
+  auto observer = event_bus->register_handler<immer::box<events::CreateLobbyEvent>>(
+      [&](const immer::box<events::CreateLobbyEvent> &ev) {
+        captured = ev->preferred_render_node;
+        if (ev->on_setup_over.get()) {
+          ev->on_setup_over.get()->set_value(true); // Unblock the endpoint.
+        }
+      });
+
+  auto runtime_dir = api_runtime_dir();
+  auto socket_path = api_socket_path();
+  std::thread server_thread([app_state, runtime_dir]() { wolf::api::start_server(runtime_dir, app_state); });
+  server_thread.detach();
+  std::this_thread::sleep_for(std::chrono::milliseconds(42));
+
+  auto curl = curl_ptr(curl_easy_init(), ::curl_easy_cleanup);
+  curl_easy_setopt(curl.get(), CURLOPT_UNIX_SOCKET_PATH, socket_path.c_str());
+  curl_easy_setopt(curl.get(), CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_0);
+
+  auto new_lobby = CreateLobbyRequest{.profile_id = "test_profile",
+                                      .session_id = std::to_string(session_id),
+                                      .name = "gpu_lobby",
+                                      .multi_user = false,
+                                      .stop_when_everyone_leaves = false,
+                                      .video_settings = {.width = 1920,
+                                                         .height = 1080,
+                                                         .refresh_rate = 60,
+                                                         .wayland_render_node = "software",
+                                                         .runner_render_node = "software",
+                                                         .video_producer_buffer_caps = "video/x-raw"},
+                                      .audio_settings = {.channel_count = 2},
+                                      .runner_state_folder = "runner_state_folder",
+                                      .runner = wolf::config::AppCMD{.run_cmd = "sleep 0"}};
+  auto response =
+      req(curl.get(), HTTPMethod::POST, "http://localhost/api/v1/lobbies/create", rfl::json::write(new_lobby));
+  REQUIRE(response);
+
+  REQUIRE(captured.has_value());
+  REQUIRE(captured.value() == std::optional<std::string>("/dev/dri/renderD128"));
+}
+
 TEST_CASE("Utils APIs", "[API]") {
   auto event_bus = std::make_shared<events::EventBusType>();
   auto running_sessions = std::make_shared<immer::atom<immer::vector<events::StreamSession>>>();

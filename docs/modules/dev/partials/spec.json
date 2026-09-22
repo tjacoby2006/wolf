@@ -1164,6 +1164,17 @@
             "type": "string",
             "description": "The profile that originally created the lobby"
           },
+          "session_id": {
+            "description": "The id of the session that is creating this lobby. When set, the lobby is pinned to the same GPU as that session so the session's encoder can consume the lobby's frames.",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "type": "string"
           },

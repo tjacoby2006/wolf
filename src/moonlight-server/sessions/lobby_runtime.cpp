@@ -43,17 +43,23 @@ void MoonlightLobbyRuntime::assign_gpu() {
   auto lobby = context_.lobby;
   auto gpu_balancer = context_.app_state->gpu_balancer;
 
-  auto chosen = gpu_balancer->load()->pick(std::nullopt);
+  // The lobby's frames are consumed by the encoder of the session that created it, and that encoder's
+  // GPU is fixed when the session goes to RTSP PLAY. Rendering on a different node would hand the
+  // encoder GPU memory it can't address, so inherit the creating session's node when we have it and
+  // only load-balance as a fallback (`pick` returns nullopt when a pinned node isn't in the pool).
+  auto preferred = context_.settings->preferred_render_node;
+  auto chosen = gpu_balancer->load()->pick_preferring(preferred);
+
   logs::log(logs::info,
-            "[LOBBY] Picked GPU {} for lobby {}",
+            "[LOBBY] Picked GPU {} for lobby {} (preferred={})",
             chosen.has_value() ? *chosen : "<none>",
-            lobby->id);
+            lobby->id,
+            preferred.has_value() ? *preferred : "<none>");
 
   // The pool is discovered at startup and can go stale (GPU reset, driver reload, ...).
   // Handing a dead node to the virtual compositor makes it panic and abort Wolf, so probe first.
   if (chosen.has_value() && !is_render_node_available(*chosen)) {
     logs::log(logs::error, "[LOBBY] Assigned GPU {} is not available for lobby {}", *chosen, lobby->id);
-    gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.release(node); });
     chosen.reset();
   }
 
