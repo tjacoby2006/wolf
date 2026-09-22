@@ -86,8 +86,14 @@ weights/exclusions. The default `WOLF_RENDER_NODE` is always included so single-
     `assigned_render_node` (falling back to `app->render_node`) into a new
     `CreateLobbyEvent.preferred_render_node`. `MoonlightLobbyRuntime::assign_gpu` calls
     `GpuBalancer::pick_preferring(preferred_render_node)`, which uses the preferred node when it is
-    available and otherwise logs a warning and falls back to normal load balancing. When no `session_id`
-    is supplied (e.g. an app still starting), the lobby load-balances as before.
+    available and otherwise logs a warning and falls back to normal load balancing.
+  - **Inferring the driving session**: clients don't reliably send `session_id` — wolf-ui creates the
+    lobby from inside the session it is running in, but only sends the id on *join*/`runners/start`, not
+    on `/lobbies/create`. So when `session_id` is absent, `endpoint_LobbyCreate` falls back to
+    `state::get_launcher_session_id`, which returns the **unique** running session whose app has
+    `start_virtual_compositor` (i.e. the compositor-running session a lobby is created from). That session
+    is then resolved exactly like an explicit `session_id`. If zero or more than one such session exists
+    the request is genuinely ambiguous and the lobby load-balances as before.
 
 ### Per-GPU container scoping (the correctness crux)
 Today [`RunDocker::run`](src/moonlight-server/runners/docker.cpp:86) sets `NVIDIA_VISIBLE_DEVICES=all` and

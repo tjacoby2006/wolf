@@ -36,6 +36,30 @@ inline std::optional<events::StreamSession> get_session_by_client(const immer::v
   return get_session_by_id(sessions, client_id);
 }
 
+/**
+ * Resolve the session that is driving a lobby when the caller did not say which one it is.
+ *
+ * A lobby's frames are consumed by the encoder of the session that created it, and that encoder's GPU is
+ * frozen at RTSP PLAY. Clients such as wolf-ui create a lobby from inside a *launcher session* (the one
+ * running the virtual compositor, i.e. `start_virtual_compositor`), so that session's node is the one the
+ * lobby must render on. We can only do this unambiguously when exactly one such session is running:
+ * otherwise the request is genuinely ambiguous and we return `nullopt` so the caller falls back to
+ * normal load balancing. An explicit `session_id` always takes precedence over this heuristic.
+ */
+inline std::optional<std::size_t> get_launcher_session_id(const immer::vector<events::StreamSession> &sessions) {
+  std::optional<std::size_t> launcher;
+  for (const events::StreamSession &session : sessions) {
+    if (session.app && session.app->start_virtual_compositor) {
+      if (launcher.has_value()) {
+        // More than one launcher session: don't guess.
+        return std::nullopt;
+      }
+      launcher = session.session_id;
+    }
+  }
+  return launcher;
+}
+
 inline std::optional<events::Lobby> get_lobby_by_id(const immer::vector<events::Lobby> &lobbies,
                                                     std::string_view lobby_id) {
   auto results = lobbies |                                                                                      //

@@ -124,7 +124,8 @@ struct CreateLobbyRequest {
   rfl::Description<"The profile that originally created the lobby", std::string> profile_id;
   rfl::Description<"The id of the session that is creating this lobby. When set, the lobby is pinned "
                    "to the same GPU as that session so the session's encoder can consume the lobby's "
-                   "frames.",
+                   "frames. When omitted, Wolf infers the launcher session (the single running session "
+                   "that starts a virtual compositor) and pins to its GPU instead.",
                    std::optional<std::string>>
       session_id;
   std::string name;

@@ -30,12 +30,26 @@ void UnixSocketServer::endpoint_LobbyCreate(const wolf::api::HTTPRequest &req, s
 
     // The lobby's frames are consumed by the creating session's encoder, whose GPU is fixed at RTSP
     // PLAY. Resolve that node here so the lobby renders on the same GPU (see `CreateLobbyEvent`).
+    //
+    // Clients like wolf-ui don't send an explicit `session_id`, but they create the lobby from inside
+    // the launcher session (the one running the virtual compositor) that will then join it. Falling back
+    // to that session keeps render and encode on one GPU for those clients too.
     std::optional<std::string> preferred_render_node = std::nullopt;
+    auto running_sessions = this->state_->app_state->running_sessions->load();
+    std::optional<std::size_t> creating_session_id;
     if (auto session_id = event.value().session_id.get(); session_id.has_value() && !session_id->empty()) {
-      auto session = state::get_session_by_id(this->state_->app_state->running_sessions->load(),
-                                              std::stoul(*session_id));
+      creating_session_id = std::stoul(*session_id);
+    } else {
+      creating_session_id = state::get_launcher_session_id(running_sessions);
+      if (creating_session_id) {
+        logs::log(logs::debug, "[API] No session_id for lobby creation, using launcher session {}",
+                  *creating_session_id);
+      }
+    }
+    if (creating_session_id) {
+      auto session = state::get_session_by_id(running_sessions.get(), *creating_session_id);
       if (!session) {
-        logs::log(logs::warning, "[API] Invalid session_id for lobby creation: {}", *session_id);
+        logs::log(logs::warning, "[API] Invalid session_id for lobby creation: {}", *creating_session_id);
         send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "Invalid session_id"}));
         return;
       }

@@ -8,6 +8,7 @@
 #include <rfl/toml.hpp>
 #include <sessions/handlers.hpp>
 #include <state/config.hpp>
+#include <state/sessions.hpp>
 
 using Catch::Matchers::ContainsSubstring;
 using Catch::Matchers::Equals;
@@ -692,23 +693,38 @@ TEST_CASE("Lobbies APIs", "[API]") {
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }
 
-// A lobby renders the frames that the creating session's encoder consumes, and that encoder's GPU is
-// fixed at RTSP PLAY. The lobby must therefore inherit the creating session's node, otherwise the
-// encoder ends up reading frames produced on a different GPU.
-TEST_CASE("Creating a lobby inherits the creating session's GPU", "[API]") {
+/** A session that runs the virtual compositor: the kind of session that creates lobbies. */
+events::StreamSession launcher_session(std::size_t session_id) {
+  return events::StreamSession{
+      .app = std::make_shared<events::App>(events::App{.base = moonlight::App{.title = "gpu_test_app"},
+                                                         .render_node = "/dev/dri/renderD136",
+                                                         .start_virtual_compositor = true}),
+      .assigned_render_node = "/dev/dri/renderD128",
+      .session_id = session_id};
+}
+
+/** A game session: it consumes a lobby's frames but doesn't create them. */
+events::StreamSession game_session(std::size_t session_id) {
+  return events::StreamSession{
+      .app = std::make_shared<events::App>(events::App{.base = moonlight::App{.title = "gpu_test_app"},
+                                                         .render_node = "/dev/dri/renderD136",
+                                                         .start_virtual_compositor = false}),
+      .assigned_render_node = "/dev/dri/renderD129",
+      .session_id = session_id};
+}
+
+/**
+ * Seed `sessions` into a throwaway app state, hit `POST /lobbies/create` with the given optional
+ * `session_id`, and return the `preferred_render_node` the endpoint put on the emitted
+ * `CreateLobbyEvent`.
+ */
+std::optional<std::optional<std::string>>
+create_lobby_and_capture_render_node(const immer::vector<events::StreamSession> &sessions,
+                                     std::optional<std::string> session_id) {
   auto event_bus = std::make_shared<events::EventBusType>();
   auto running_sessions = std::make_shared<immer::atom<immer::vector<events::StreamSession>>>();
+  running_sessions->update([&sessions](const immer::vector<events::StreamSession> &) { return sessions; });
   auto config = immer::box<state::Config>(state::load_or_default("config.test.toml", event_bus, running_sessions));
-
-  // A session (as started by wolf-ui) that has already been assigned a render node.
-  const std::size_t session_id = 4321;
-  running_sessions->update([session_id](const immer::vector<events::StreamSession> &sessions) {
-    return sessions.push_back(events::StreamSession{
-        .app = std::make_shared<events::App>(events::App{.base = moonlight::App{.title = "gpu_test_app"},
-                                                         .render_node = "/dev/dri/renderD136"}),
-        .assigned_render_node = "/dev/dri/renderD128",
-        .session_id = session_id});
-  });
 
   auto app_state = immer::box<state::AppState>(state::AppState{
       .config = config,
@@ -718,11 +734,12 @@ TEST_CASE("Creating a lobby inherits the creating session's GPU", "[API]") {
       .lobbies = std::make_shared<immer::atom<immer::vector<events::Lobby>>>(),
       .running_sessions = running_sessions});
 
-  // Capture the event the endpoint emits instead of standing up a real compositor/runner.
-  std::optional<std::optional<std::string>> captured;
+  // Capture the event the endpoint emits instead of standing up a real compositor/runner. The server
+  // thread outlives this scope, so the capture is shared rather than a reference to a local.
+  auto captured = std::make_shared<std::optional<std::optional<std::string>>>();
   auto observer = event_bus->register_handler<immer::box<events::CreateLobbyEvent>>(
-      [&](const immer::box<events::CreateLobbyEvent> &ev) {
-        captured = ev->preferred_render_node;
+      [captured](const immer::box<events::CreateLobbyEvent> &ev) {
+        *captured = ev->preferred_render_node;
         if (ev->on_setup_over.get()) {
           ev->on_setup_over.get()->set_value(true); // Unblock the endpoint.
         }
@@ -739,7 +756,7 @@ TEST_CASE("Creating a lobby inherits the creating session's GPU", "[API]") {
   curl_easy_setopt(curl.get(), CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_0);
 
   auto new_lobby = CreateLobbyRequest{.profile_id = "test_profile",
-                                      .session_id = std::to_string(session_id),
+                                      .session_id = session_id,
                                       .name = "gpu_lobby",
                                       .multi_user = false,
                                       .stop_when_everyone_leaves = false,
@@ -755,9 +772,65 @@ TEST_CASE("Creating a lobby inherits the creating session's GPU", "[API]") {
   auto response =
       req(curl.get(), HTTPMethod::POST, "http://localhost/api/v1/lobbies/create", rfl::json::write(new_lobby));
   REQUIRE(response);
+  return *captured;
+}
 
-  REQUIRE(captured.has_value());
-  REQUIRE(captured.value() == std::optional<std::string>("/dev/dri/renderD128"));
+TEST_CASE("Launcher session resolution", "[API]") {
+  SECTION("No session runs a virtual compositor") {
+    immer::vector<events::StreamSession> sessions;
+    sessions = sessions.push_back(game_session(1));
+    REQUIRE(!state::get_launcher_session_id(sessions).has_value());
+  }
+
+  SECTION("A single launcher session is unambiguously resolved") {
+    immer::vector<events::StreamSession> sessions;
+    sessions = sessions.push_back(game_session(1));
+    sessions = sessions.push_back(launcher_session(2));
+    REQUIRE(state::get_launcher_session_id(sessions) == std::optional<std::size_t>(2));
+  }
+
+  SECTION("Two launcher sessions are ambiguous") {
+    immer::vector<events::StreamSession> sessions;
+    sessions = sessions.push_back(launcher_session(1));
+    sessions = sessions.push_back(launcher_session(2));
+    REQUIRE(!state::get_launcher_session_id(sessions).has_value());
+  }
+}
+
+// A lobby renders the frames that the creating session's encoder consumes, and that encoder's GPU is
+// fixed at RTSP PLAY. The lobby must therefore inherit the creating session's node, otherwise the
+// encoder ends up reading frames produced on a different GPU.
+TEST_CASE("Creating a lobby inherits the creating session's GPU", "[API]") {
+  SECTION("The client tells us which session is creating the lobby") {
+    immer::vector<events::StreamSession> sessions;
+    sessions = sessions.push_back(launcher_session(4321));
+
+    auto captured = create_lobby_and_capture_render_node(sessions, "4321");
+    REQUIRE(captured.has_value());
+    REQUIRE(captured.value() == std::optional<std::string>("/dev/dri/renderD128"));
+  }
+
+  // wolf-ui doesn't send a `session_id`, but it creates the lobby from the launcher session it is
+  // running in, and that is the session whose encoder will consume the frames.
+  SECTION("The client doesn't tell us, so we infer the launcher session") {
+    immer::vector<events::StreamSession> sessions;
+    sessions = sessions.push_back(game_session(1234));
+    sessions = sessions.push_back(launcher_session(4321));
+
+    auto captured = create_lobby_and_capture_render_node(sessions, std::nullopt);
+    REQUIRE(captured.has_value());
+    REQUIRE(captured.value() == std::optional<std::string>("/dev/dri/renderD128"));
+  }
+
+  SECTION("Two launcher sessions are ambiguous, so we load balance instead") {
+    immer::vector<events::StreamSession> sessions;
+    sessions = sessions.push_back(launcher_session(4321));
+    sessions = sessions.push_back(launcher_session(4322));
+
+    auto captured = create_lobby_and_capture_render_node(sessions, std::nullopt);
+    REQUIRE(captured.has_value());
+    REQUIRE(captured.value() == std::nullopt);
+  }
 }
 
 TEST_CASE("Utils APIs", "[API]") {
