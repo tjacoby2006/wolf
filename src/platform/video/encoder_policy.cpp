@@ -119,19 +119,36 @@ std::string scope_pipeline_to_node(const std::string &pipeline,
     return result;
   }
 
-  // NVIDIA: nvcodec elements are addressed by CUDA device index via the `cuda-device-id`
-  // property (GstNvH26xEnc:cuda-device-id / GstNvAv1Enc:cuda-device-id). Note that the property is
-  // *not* called `cuda-device`: using the wrong name makes gst_parse_launch fail with
-  // "no property \"cuda-device\" in element \"nvh265enc\"" and the encoder is never linked.
-  // `cudaupload`/`cudaconvertscale` take the device from the GstCudaContext that the pipeline pulls
-  // in via NEED_CONTEXT, so only the encoder itself has to be re-pointed here.
+  // NVIDIA: the CUDA-mode nvcodec encoders (nvh264enc/nvh265enc/nvav1enc) install their
+  // `cuda-device-id` property as **read-only** ("CUDA device ID of associated GPU", flags: Read).
+  // The device is baked into the element class when the plugin is loaded: the first CUDA device
+  // registers under the plain name (`nvh265enc`) and every further device registers as a
+  // per-device element (`nvh265device1enc`, `nvh264device1enc`, ...). Writing `cuda-device-id=` on
+  // the plain element therefore only produces
+  //   GLib-GObject-CRITICAL: property 'cuda-device-id' of object class 'GstNvH265Enc' is not writable
+  // and the value is silently dropped, leaving the encoder pinned to the first GPU.
+  //
+  // To actually move encoding onto another GPU we switch to the per-device element instead.
+  // `cudaupload`/`cudaconvertscale` own the CUDA buffers and *do* expose a writable
+  // `cuda-device-id` (-1 means "auto"), so they are pinned to the same device to keep the whole
+  // upload -> convert -> encode chain on one GPU.
   if (vendor == GpuVendor::Nvidia) {
     auto idx = nvidia_index(render_node);
     if (!idx) {
       return pipeline;
     }
     std::string result = pipeline;
-    for (const auto &el : {"nvh264enc", "nvh265enc", "nvav1enc"}) {
+
+    // CUDA device 0 is the plain element name; anything else needs the per-device element.
+    if (*idx != "0") {
+      for (const auto &codec : {"h264", "h265", "av1"}) {
+        std::regex re(std::string("(\\bnv") + codec + std::string("enc\\b)"));
+        result = std::regex_replace(result, re, "nv" + std::string(codec) + "device" + *idx + "enc");
+      }
+    }
+
+    // Pin the CUDA upload/convert elements (writable property) to the same device.
+    for (const auto &el : {"cudaupload", "cudaconvertscale"}) {
       std::regex re(std::string("(\\b") + el + std::string("\\b)(?!\\s*cuda-device-id=)"));
       result = std::regex_replace(result, re, "$1 cuda-device-id=" + *idx);
     }

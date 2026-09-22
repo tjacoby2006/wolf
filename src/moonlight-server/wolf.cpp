@@ -7,6 +7,7 @@
 #include <core/docker.hpp>
 #include <core/gstreamer.hpp>
 #include <csignal>
+#include <cstdlib>
 #include <exceptions/exceptions.h>
 #include <filesystem>
 #include <immer/array_transient.hpp>
@@ -261,6 +262,17 @@ static void stop_all_sessions(const immer::box<state::AppState> &local_state) {
 }
 
 void run() {
+  /*
+   * Make CUDA enumerate devices in PCI bus order *before* anything loads the CUDA runtime.
+   *
+   * The per-device nvcodec encoder element suffix (`nvh265device1enc`, ...) is the CUDA device
+   * ordinal, and we resolve that ordinal from the render node's PCI bus id. CUDA's default order is
+   * FASTEST_FIRST, which can disagree with PCI order on multi-GPU hosts and would make the encoder
+   * target the wrong GPU. Forcing PCI_BUS_ID keeps every consumer (this process, the GStreamer CUDA
+   * context, the encoder element names) on the same numbering.
+   */
+  setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
+
   streaming::init(); // Need to initialise gstreamer once
   control::init();   // Need to initialise enet once
   docker::init();    // Need to initialise libcurl once

@@ -112,10 +112,51 @@ TEST_CASE("scope_pipeline_to_node rewrites only device-specific elements", "[enc
     REQUIRE(out == "vah264enc device=/dev/dri/renderD129 ! queue");
   }
 
-  SECTION("NVIDIA gets a cuda-device-id= index") {
+  SECTION("NVIDIA switches to the per-device encoder element") {
+    // CUDA-mode nvcodec encoders expose a read-only `cuda-device-id`; the device is baked into the
+    // element class instead. Non-zero devices must be addressed by their per-device name.
     auto resolver = [](const std::string &) { return std::optional<std::string>("1"); };
     auto out = scope_pipeline_to_node("nvh264enc ! queue", "/dev/dri/renderD136", GpuVendor::Nvidia, resolver);
-    REQUIRE(out == "nvh264enc cuda-device-id=1 ! queue");
+    REQUIRE(out == "nvh264device1enc ! queue");
+  }
+
+  SECTION("NVIDIA keeps the plain element name on CUDA device 0") {
+    auto resolver = [](const std::string &) { return std::optional<std::string>("0"); };
+    auto out = scope_pipeline_to_node("nvh265enc ! queue", "/dev/dri/renderD128", GpuVendor::Nvidia, resolver);
+    REQUIRE(out == "nvh265enc ! queue");
+  }
+
+  SECTION("NVIDIA pins the writable cuda-device-id on upload/convert") {
+    auto resolver = [](const std::string &) { return std::optional<std::string>("1"); };
+    auto out = scope_pipeline_to_node("cudaupload ! cudaconvertscale add-borders=true ! queue",
+                                      "/dev/dri/renderD136",
+                                      GpuVendor::Nvidia,
+                                      resolver);
+    REQUIRE(out == "cudaupload cuda-device-id=1 ! cudaconvertscale cuda-device-id=1 add-borders=true ! queue");
+  }
+
+  SECTION("NVIDIA rewrites a full nvcodec pipeline") {
+    auto resolver = [](const std::string &) { return std::optional<std::string>("1"); };
+    auto out = scope_pipeline_to_node("cudaupload !\n"
+                                      "cudaconvertscale add-borders=true !\n"
+                                      "video/x-raw(memory:CUDAMemory), format=NV12 !\n"
+                                      "nvh265enc gop-size=-1 bitrate=1000 ! h265parse",
+                                      "/dev/dri/renderD136",
+                                      GpuVendor::Nvidia,
+                                      resolver);
+    REQUIRE(out == "cudaupload cuda-device-id=1 !\n"
+                   "cudaconvertscale cuda-device-id=1 add-borders=true !\n"
+                   "video/x-raw(memory:CUDAMemory), format=NV12 !\n"
+                   "nvh265device1enc gop-size=-1 bitrate=1000 ! h265parse");
+  }
+
+  SECTION("NVIDIA does not add cuda-device-id twice") {
+    auto resolver = [](const std::string &) { return std::optional<std::string>("1"); };
+    auto out = scope_pipeline_to_node("cudaupload cuda-device-id=1 ! cudaconvertscale cuda-device-id=1 add-borders=true",
+                                      "/dev/dri/renderD136",
+                                      GpuVendor::Nvidia,
+                                      resolver);
+    REQUIRE(out == "cudaupload cuda-device-id=1 ! cudaconvertscale cuda-device-id=1 add-borders=true");
   }
 
   SECTION("NVIDIA without a resolvable index is left unchanged") {

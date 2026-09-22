@@ -175,10 +175,15 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
   // The encoder pipeline is built once at startup against the default encoder node. Re-point it at
   // the render node actually assigned to this session so encoding follows rendering (otherwise a
   // session rendering on GPU1 would still encode on GPU0).
-  auto gst_pipeline = wolf::platform::scope_pipeline_to_node(video_session->gst_pipeline,
-                                                             video_session->render_node,
-                                                             to_platform_vendor(get_vendor(video_session->render_node)),
-                                                             get_nvidia_device_index);
+  auto vendor = to_platform_vendor(get_vendor(video_session->render_node));
+  auto gst_pipeline = wolf::platform::scope_pipeline_to_node(
+      video_session->gst_pipeline, video_session->render_node, vendor, get_nvidia_device_index);
+
+  logs::log(logs::info,
+            "[GSTREAMER] Video session {} encoding on {} (vendor: {})",
+            video_session->session_id,
+            video_session->render_node,
+            wolf::platform::to_string(vendor));
 
   auto pipeline = fmt::format(
       fmt::runtime(gst_pipeline),

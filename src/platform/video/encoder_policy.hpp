@@ -139,7 +139,9 @@ using NvidiaIndexResolver = std::function<std::optional<std::string>(const std::
  * Replaces `apply_encoder_node()`. Only the parts of the pipeline that name a device are
  * rewritten:
  *   - VAAPI/QuickSync encoders take a `device=` property.
- *   - NVIDIA nvcodec elements are addressed by CUDA device index via `cuda-device-id=`.
+ *   - NVIDIA nvcodec is handled by swapping in the per-device encoder element
+ *     (`nvh265device1enc` for CUDA device 1, etc.) and pinning the writable
+ *     `cuda-device-id` on `cudaupload`/`cudaconvertscale`.
  * Software encoders and unrecognised pipelines are returned unchanged.
  */
 std::string scope_pipeline_to_node(const std::string &pipeline,
