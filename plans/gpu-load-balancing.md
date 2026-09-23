@@ -5,8 +5,10 @@ Let Wolf spread app containers across multiple GPUs instead of pinning the whole
 Requirements:
 - Per-app GPU assignment (not global).
 - Users can **exclude** GPUs from the pool (e.g. an iGPU used for the display).
-- Track **how many containers are using each GPU** and prefer a now-free GPU over round-robin.
-- Optional user-supplied **relative performance weight** per GPU (RTX 3090 vs 1660 → send 2+ apps to the 3090 first).
+- Track **how many containers are using each GPU** and never send a new one to an already-full GPU when a
+  lighter one is free (the weight decides how many a GPU counts as "full").
+- Optional user-supplied **relative performance weight** per GPU (RTX 3090 vs 1660 → a 4:1 weight sends the
+  first four apps to the 3090 and then keeps them at that 4:1 ratio).
 
 > **Note (removed feature):** a per-app hard *pin* (`gpu_pin`) existed briefly but was removed. It was only
 > useful at the top-level app and a session is stuck with its assigned GPU for its whole lifetime anyway,
@@ -57,8 +59,18 @@ Data:
 
 API (pure functions over an immutable snapshot; caller swaps in the new one via `atom->update`):
 - `pick() -> optional<render_node>`
-  - Among non-excluded GPUs, minimize `usage[node] / weight[node]`; tie-break by lowest usage,
-    then stable path order. Return best.
+  - Among non-excluded GPUs, minimize the *result* of the assignment, `(usage[node] + 1) / weight[node]`;
+    tie-break by lowest usage, then by highest weight, then stable path order. Return best.
+  - Scoring the post-assignment load (`usage + 1`) rather than the current load is what makes the weight
+    mean anything on an idle pool: `usage / weight` is `0` for every idle GPU, so the ratio could only
+    ever show up after the fact and a burst of simultaneous starts always spilled one container onto the
+    weak GPU immediately. With `(usage + 1) / weight` the choice reflects what the GPU would then be
+    carrying, so a 4:1 pair really does take 4:1 and a 3–4× stronger GPU absorbs the first several apps.
+  - The highest-weight tie-break still matters for the *first* pick, where every score is `1 / weight`:
+    without it `renderD128` (weight 9) would beat `renderD129` (weight 10) purely because the path sorts first.
+  - Trade-off worth knowing: `usage + 1` means an idle GPU no longer automatically wins, so a GPU that was
+    just freed is not unconditionally preferred over an idle one — the weights can send the next container
+    to the stronger GPU instead of back to the just-freed one. That is the intended price of honouring weights.
 - `acquire(snapshot, node) -> snapshot'` (increments usage)
 - `release(snapshot, node) -> snapshot'` (decrements usage, floor 0)
 
@@ -110,7 +122,8 @@ Deriving the NVIDIA index/uuid from a render node is a small helper in `platform
 
 ## Testing
 - New Catch2 file `tests/testGpuBalancer.cpp` (pure logic, no GPU needed):
-  - weight-aware pick (3090 w=4 vs 1660 w=1 → first two apps land on 3090),
+  - weight-aware pick (3090 w=4 vs 1660 w=1 → the first three apps land on the 3090, the fourth spills to
+    the 1660 because 4/4 ties with 1/1 and the least-loaded GPU wins the tie, then it settles at 4:1),
   - exclusion honored, pin override, pin to excluded errors,
   - acquire/release refcount reuse (app quits → next app reuses the freed GPU).
 - Add `[gpus]` entries to [`tests/assets/config.test.toml`](tests/assets/config.test.toml) and assert parse.

@@ -91,25 +91,20 @@ void MoonlightSessionRuntime::assign_gpu(std::uint64_t session_id) {
   auto session = context_.stream_session;
   auto gpu_balancer = context_.app_state->gpu_balancer;
 
-  auto chosen = gpu_balancer->load()->pick();
-  logs::log(logs::info,
-            "[SESSION] Picked GPU {} for session {}",
-            chosen.has_value() ? *chosen : "<none>",
-            session_id);
-
-  // The pool is discovered at startup and can go stale (GPU reset, driver reload, ...).
-  // Handing a dead node to the virtual compositor makes it panic and abort Wolf, so probe first.
-  if (chosen.has_value() && !is_render_node_available(*chosen)) {
-    logs::log(logs::error, "[SESSION] Assigned GPU {} is not available for session {}", *chosen, session_id);
-    gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.release(node); });
-    chosen.reset();
-  }
+  // Pick, probe and reserve in one atomic step. Picking without reserving would let two sessions
+  // starting at the same instant read the same free GPU; probing afterwards (as a separate step)
+  // would leave a dead node looking perpetually idle and therefore winning every subsequent pick.
+  auto chosen = state::pick_and_acquire(gpu_balancer, [](const state::GpuBalancer &bal, const std::vector<std::string> &avoid) {
+    return bal.pick_avoiding(avoid);
+  });
 
   if (!chosen.has_value()) {
     logs::log(logs::error, "[SESSION] No available GPU for session {}", session_id);
     post(StopRequested{.reason = "no available GPU"});
     return;
   }
+
+  logs::log(logs::info, "[SESSION] Assigned GPU {} to session {}", *chosen, session_id);
 
   // Record the assignment on the session so the runner and teardown can see it.
   session->assigned_render_node = *chosen;
@@ -126,7 +121,6 @@ void MoonlightSessionRuntime::assign_gpu(std::uint64_t session_id) {
         return v.persistent();
       });
 
-  gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.acquire(node); });
   post(GpuAssigned{.render_node = *chosen});
 }
 

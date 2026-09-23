@@ -48,20 +48,14 @@ void MoonlightLobbyRuntime::assign_gpu() {
   // encoder GPU memory it can't address, so inherit the creating session's node when we have it and
   // only load-balance as a fallback (`pick` returns nullopt when a pinned node isn't in the pool).
   auto preferred = context_.settings->preferred_render_node;
-  auto chosen = gpu_balancer->load()->pick_preferring(preferred);
 
-  logs::log(logs::info,
-            "[LOBBY] Picked GPU {} for lobby {} (preferred={})",
-            chosen.has_value() ? *chosen : "<none>",
-            lobby->id,
-            preferred.has_value() ? *preferred : "<none>");
-
-  // The pool is discovered at startup and can go stale (GPU reset, driver reload, ...).
-  // Handing a dead node to the virtual compositor makes it panic and abort Wolf, so probe first.
-  if (chosen.has_value() && !is_render_node_available(*chosen)) {
-    logs::log(logs::error, "[LOBBY] Assigned GPU {} is not available for lobby {}", *chosen, lobby->id);
-    chosen.reset();
-  }
+  // Pick, probe and reserve in one atomic step, so a stale node is skipped and never left looking
+  // idle (which would make it win every later pick).
+  auto chosen = state::pick_and_acquire(
+      gpu_balancer,
+      [&preferred](const state::GpuBalancer &bal, const std::vector<std::string> &avoid) {
+        return bal.pick_preferring(preferred, avoid);
+      });
 
   if (!chosen.has_value()) {
     logs::log(logs::error, "[LOBBY] No available GPU for lobby {}", lobby->id);
@@ -69,8 +63,13 @@ void MoonlightLobbyRuntime::assign_gpu() {
     return;
   }
 
+  logs::log(logs::info,
+            "[LOBBY] Assigned GPU {} to lobby {} (preferred={})",
+            *chosen,
+            lobby->id,
+            preferred.has_value() ? *preferred : "<none>");
+
   lobby->assigned_render_node = *chosen;
-  gpu_balancer->update([node = *chosen](const state::GpuBalancer &bal) { return bal.acquire(node); });
   post(LobbyGpuAssigned{.render_node = *chosen});
 }
 

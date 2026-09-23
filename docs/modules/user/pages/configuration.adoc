@@ -512,13 +512,16 @@ Wolf can automatically spread apps across multiple GPUs instead of pinning every
 Every render node found under `/dev/dri` (`renderD*`) is added to a pool, along with the `WOLF_RENDER_NODE` default, so single-GPU setups keep working unchanged.
 
 When a new app (or lobby) starts, Wolf picks a GPU from the pool and remembers how many containers are currently using each one.
-This means a GPU that has just been freed by a quitting app is reused before any other GPU is considered — it is not a blind round-robin.
+A GPU that has just been freed by a quitting app will therefore be preferred over one that is still busy — it is not a blind round-robin.
+
+Wolf scores each candidate by how loaded that GPU *would be* after accepting the container, relative to its weight (internally `(usage + 1) / weight`), and picks the lowest score.
+Scoring the resulting load rather than the current one is what makes a weight meaningful on an otherwise idle pool: it means a stronger GPU absorbs several apps in a row instead of only being preferred later on.
 
 You can tune this behaviour in the `config.toml` file:
 
 * `[gpus]` — an optional table mapping a render node path to an integer *weight* (a relative performance metric you supply).
-A higher weight means more apps are balanced onto that GPU before Wolf spills over to the others.
-For example, with an RTX 3090 and a 1660 you can send two or more apps to the 3090 first:
+A higher weight means more apps are balanced onto that GPU before Wolf spills over to the others, and while the GPUs are idle the highest-weighted one is picked first, regardless of the render node number.
+For example, with an RTX 3090 and a 1660, weighting them 4:1 keeps four apps on the 3090 for every one on the 1660 (the first three go to the 3090 immediately):
 
 [source,toml]
 ----

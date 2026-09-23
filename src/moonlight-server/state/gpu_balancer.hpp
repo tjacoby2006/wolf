@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include <helpers/logger.hpp>
+#include <immer/atom.hpp>
 #include <platforms/hw.hpp>
 
 namespace state {
@@ -39,26 +42,52 @@ struct GpuBalancer {
   }
 
   /**
-   * Pick a render node for a new container by minimising `usage[node] / weight[node]` across the
-   * non-excluded pool so that:
-   *  - a now-free GPU (usage dropped to 0) is preferred over round-robin, and
-   *  - a higher-weighted GPU (e.g. an RTX 3090 vs a 1660) takes more apps before we spill over.
-   * Ties are broken by lowest absolute usage, then by node path for determinism.
+   * Pick a render node for a new container by minimising `(usage[node] + 1) / weight[node]` across
+   * the non-excluded pool, so that a higher-weighted GPU (e.g. an RTX 3090 vs a 1660) genuinely
+   * takes more apps before we spill over to the others.
+   *
+   * We score the *result* of placing this container (`usage + 1`) rather than the current load
+   * (`usage`): an idle GPU always scores `0 / weight == 0` under the latter, so the second app would
+   * abandon a merely-busy 4x GPU for a weak idle one no matter how the weights are set, and the
+   * ratio would only emerge over a long burst. Scoring the result makes the very first pick — and
+   * every one after it — respect the ratio: with weights 4 and 1 the strong GPU takes three apps
+   * before the weak one gets its first, then settles into four for every one.
+   *
+   * Ties are broken by lowest absolute usage (so on an equal score the least-loaded GPU wins, which
+   * is what keeps a just-freed GPU attractive), then by the highest weight, then by node path for
+   * determinism.
    */
-  std::optional<std::string> pick() const {
+  std::optional<std::string> pick() const { return pick_avoiding({}); }
+
+  /**
+   * Like `pick`, but never returns one of the nodes in `avoid`.
+   *
+   * Callers use this to retry after a probe (`is_render_node_available`) rejects the best-scoring
+   * node — e.g. a GPU that was reset or whose driver was reloaded after the pool was discovered.
+   * Nodes are only skipped for the duration of the call, so the caller stays in control of whether a
+   * rejected node should also have its usage counters touched (it should not: it was never acquired).
+   */
+  std::optional<std::string> pick_avoiding(const std::vector<std::string> &avoid) const {
     std::optional<std::string> best;
     double best_score = 0.0;
     int best_usage = 0;
+    int best_weight = 0;
     for (const auto &[node, info] : pool) {
       if (info.excluded)
         continue;
+      if (std::find(avoid.begin(), avoid.end(), node) != avoid.end())
+        continue;
+      int weight = std::max(1, info.weight);
       int current = usage.count(node) ? usage.at(node) : 0;
-      double score = static_cast<double>(current) / std::max(1, info.weight);
-      bool better = !best.has_value() || score < best_score || (score == best_score && current < best_usage);
+      double score = static_cast<double>(current + 1) / weight;
+      bool better = !best.has_value() || score < best_score ||
+                    (score == best_score &&
+                     (current < best_usage || (current == best_usage && weight > best_weight)));
       if (better) {
         best = node;
         best_score = score;
         best_usage = current;
+        best_weight = weight;
       }
     }
     return best;
@@ -69,10 +98,16 @@ struct GpuBalancer {
    * excluded, otherwise fall back to load balancing.
    *
    * This is what a lobby uses to stay on the GPU of the session that created it (so the session's
-   * encoder can read the lobby's frames) without breaking when that GPU is unavailable.
+   * encoder can read the lobby's frames) without breaking when that GPU is unavailable. A node in
+   * `avoid` (one a caller already probed and rejected) is treated as unavailable, so the walk-down
+   * in the runtime does not loop on the same node.
    */
-  std::optional<std::string> pick_preferring(const std::optional<std::string> &preferred_node) const {
-    if (preferred_node.has_value()) {
+  std::optional<std::string> pick_preferring(const std::optional<std::string> &preferred_node,
+                                             const std::vector<std::string> &avoid = {}) const {
+    auto avoided = [&avoid](const std::string &node) {
+      return std::find(avoid.begin(), avoid.end(), node) != avoid.end();
+    };
+    if (preferred_node.has_value() && !avoided(*preferred_node)) {
       if (is_available(*preferred_node)) {
         return *preferred_node;
       }
@@ -80,7 +115,7 @@ struct GpuBalancer {
                 "Preferred GPU {} is not in the pool or is excluded, falling back to load balancing",
                 *preferred_node);
     }
-    return pick();
+    return pick_avoiding(avoid);
   }
 
   /** Increment the active-container count for `node`. Returns a new snapshot. */
@@ -123,9 +158,73 @@ struct GpuBalancer {
       add(node);
     add(default_node); // always keep the default GPU available
 
+    // Sanity-check the [gpus] keys, then add them even when discovery did not find them. Discovery
+    // is best-effort (/dev can be only partially populated inside a container) but an explicit
+    // weight is user intent we must not silently drop. The runtime still probes every candidate
+    // before handing it to the compositor, so a typo'd or dead path falls through to the next GPU
+    // instead of failing the session.
+    for (const auto &entry : weights) {
+      if (!balancer.pool.count(entry.first)) {
+        logs::log(logs::warning,
+                  "[GPU] GPU {} from the [gpus] table was not discovered, adding it to the pool anyway",
+                  entry.first);
+      }
+      add(entry.first);
+    }
+    for (const auto &node : excluded)
+      add(node); // a node that is unknown-but-excluded stays out of the pool either way
+
     return balancer;
   }
 };
+
+/**
+ * Atomically pick a render node, verify it and reserve it, in a single `atom->update`.
+ *
+ * This is the only entry point runtimes should use to claim a GPU. Picking and acquiring must not be
+ * separate steps: `pick()` reads a snapshot and `acquire()` swaps in a new one, so two sessions
+ * starting at the same moment could both read the same free GPU and be handed the same node even
+ * though there was a second, equally good one available. Doing the whole pick/probe/acquire cycle
+ * inside one `update` serialises concurrent callers through immer's atom.
+ *
+ * The node is also probed before being reserved, because the pool is discovered once at startup and
+ * can go stale (GPU reset, driver reload). Handing a dead node to the virtual compositor makes it
+ * panic and abort Wolf. A candidate that fails the probe is skipped for the rest of the call and its
+ * usage is left untouched (it was never acquired), so a single bad GPU no longer fails the session
+ * and, crucially, no longer poisons every later pick by looking permanently idle.
+ *
+ * @param choose  handed the candidate snapshot and the nodes rejected so far; returns the next
+ *                candidate to try, or nullopt to give up (e.g. the pool is exhausted)
+ * @param probe   availability check, injectable so the logic can be unit tested without hardware
+ * @return the reserved node, or nullopt when no node in the pool is usable
+ */
+inline std::optional<std::string> pick_and_acquire(
+    const std::shared_ptr<immer::atom<GpuBalancer>> &balancer,
+    const std::function<std::optional<std::string>(const GpuBalancer &, const std::vector<std::string> &)> &choose,
+    const std::function<bool(const std::string &)> &probe = is_render_node_available) {
+  std::optional<std::string> chosen;
+  balancer->update([&](const GpuBalancer &bal) {
+    // `update` may run this more than once (immer's atom is transactional/lock-free), so every
+    // attempt starts from a clean slate: a stale value from an aborted pass must not leak out.
+    chosen.reset();
+    std::vector<std::string> rejected;
+    // Bounded by the pool size: every iteration rejects one distinct node.
+    for (std::size_t attempt = 0; attempt <= bal.pool.size(); ++attempt) {
+      auto candidate = choose(bal, rejected);
+      if (!candidate.has_value()) {
+        break;
+      }
+      if (probe(*candidate)) {
+        chosen = *candidate;
+        return bal.acquire(*candidate);
+      }
+      logs::log(logs::error, "[GPU] Render node {} is not available, trying the next one", *candidate);
+      rejected.push_back(*candidate);
+    }
+    return bal; // nothing usable: leave the snapshot untouched
+  });
+  return chosen;
+}
 
 /**
  * Discover render nodes available on this system.
