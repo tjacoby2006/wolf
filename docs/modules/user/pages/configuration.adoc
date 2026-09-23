@@ -541,6 +541,12 @@ GPU assignment is decided by Wolf when a session starts and is fixed for the lif
 
 Lobbies assign a single GPU once at creation (driven by the creating session) and all joining clients share it; the GPU is released when the lobby stops.
 
+Because a lobby is shared, Wolf has to be careful about the *kind* of frames its desktop produces.
+The zero-copy buffer formats (`CUDAMemory`, `DMABuf`) are device-local: a buffer belongs to one GPU and an encoder scoped to another GPU cannot read it, which shows up as a black screen with no obvious error.
+Wolf pins the lobby to the creating session's GPU so that creator keeps its zero-copy path, but a *joining* client's GPU is chosen independently, so the shared desktop cannot emit device-local memory on a multi-GPU host.
+Wolf therefore falls back to GPU-agnostic system memory (`video/x-raw`) for the lobby's desktop whenever the pool can host sessions on more than one GPU, and each client's encoder uploads to its own device.
+On a single-GPU host the lobby keeps the configured zero-copy pipeline.
+
 [TIP]
 ====
 On NVIDIA hosts without a custom driver volume, Wolf scopes each container to only its assigned GPU (via `NVIDIA_VISIBLE_DEVICES` / `DeviceIDs`) so that multiple containers can run on different GPUs at the same time.

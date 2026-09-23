@@ -4,6 +4,7 @@
 #include <core/virtual-display.hpp>
 #include <helpers/logger.hpp>
 #include <immer/vector_transient.hpp>
+#include <platform/video/encoder_policy.hpp>
 #include <platforms/hw.hpp>
 #include <range/v3/view.hpp>
 #include <sessions/common.hpp>
@@ -83,6 +84,9 @@ void MoonlightLobbyRuntime::start_desktop(const std::string &render_node) {
   auto gst_contexts = app_state->gst_contexts;
   auto event_bus = app_state->event_bus;
   auto video_settings = settings->video_settings;
+  // A lobby's desktop is shared, so its frames have to be consumable by an encoder on any GPU the
+  // load balancer may have placed a joining session on. See `producer_buffer_caps`.
+  auto buffer_caps = producer_buffer_caps();
 
   // `start_video_producer` calls `run_pipeline`, which *blocks* until the pipeline reaches EOS or
   // errors out, and it fulfils `on_ready` from the pipeline's own GStreamer bus thread when the
@@ -108,9 +112,9 @@ void MoonlightLobbyRuntime::start_desktop(const std::string &render_node) {
 
   // This thread blocks for the lifetime of the compositor: `run_pipeline` runs a GLib main loop
   // until the pipeline reaches EOS (StopLobbyEvent) or errors out.
-  std::thread([lobby, video_settings, render_node, gst_contexts, on_ready, event_bus]() {
+  std::thread([lobby, buffer_caps, video_settings, render_node, gst_contexts, on_ready, event_bus]() {
     streaming::start_video_producer(lobby->id,
-                                    video_settings.video_producer_buffer_caps,
+                                    buffer_caps,
                                     render_node,
                                     {.width = video_settings.width,
                                      .height = video_settings.height,
@@ -119,6 +123,12 @@ void MoonlightLobbyRuntime::start_desktop(const std::string &render_node) {
                                     on_ready,
                                     event_bus);
   }).detach();
+}
+
+std::string MoonlightLobbyRuntime::producer_buffer_caps() const {
+  auto configured = context_.settings->video_settings.video_producer_buffer_caps;
+  auto multi_gpu = context_.app_state->gpu_balancer->load()->is_multi_gpu();
+  return wolf::platform::shared_desktop_producer_buffer_caps(configured, multi_gpu);
 }
 
 void MoonlightLobbyRuntime::start_runner(const std::string &render_node) {
@@ -161,6 +171,11 @@ void MoonlightLobbyRuntime::start_runner(const std::string &render_node) {
       settings->on_setup_over.get()->set_value(true);
     }
 
+    // The runner runs inside the shared desktop, so it has to be told the same caps the compositor
+    // produces (exposed to the container as WOLF_VIDEO_BUFFER_CAPS); otherwise the app would render
+    // expecting device-local memory the compositor is no longer emitting.
+    auto buffer_caps = self->producer_buffer_caps();
+
     wolf::core::sessions::start_runner(
         lobby->runner,
         lobby->plugged_devices_queue,
@@ -171,8 +186,7 @@ void MoonlightLobbyRuntime::start_runner(const std::string &render_node) {
                                                     .refresh_rate = settings->video_settings.refresh_rate,
                                                     .wayland_render_node = render_node,
                                                     .runner_render_node = render_node,
-                                                    .video_producer_buffer_caps =
-                                                        settings->video_settings.video_producer_buffer_caps},
+                                                    .video_producer_buffer_caps = buffer_caps},
             .wayland_display = lobby->wayland_display->load(),
             .audio_server = audio_server,
             .audio_sink = lobby->audio_sink->load(),

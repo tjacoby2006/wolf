@@ -64,6 +64,17 @@ private:
   void teardown(const std::string &reason);
   void release_gpu();
 
+  /**
+   * The buffer caps the lobby's own compositor should produce.
+   *
+   * Unlike a session, a lobby's desktop is shared by several sessions that the load balancer may have
+   * placed on different GPUs, so its frames cannot be device-local memory. This downgrades the
+   * configured (zero-copy) caps to system memory when the pool holds more than one usable GPU, and
+   * returns them unchanged on a single-GPU host (where sharing a device is safe and zero-copy holds).
+   * See `wolf::platform::shared_desktop_producer_buffer_caps`.
+   */
+  std::string producer_buffer_caps() const;
+
   LobbyContext context_;
 };
 

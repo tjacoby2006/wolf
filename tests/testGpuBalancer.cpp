@@ -198,6 +198,46 @@ TEST_CASE("GpuBalancer::pick_avoiding skips the given nodes", "[gpu_balancer]") 
   }
 }
 
+// A shared desktop (lobby) must not emit device-local memory when its consumers can land on more
+// than one GPU; these helpers decide that. Excluded nodes are never handed out, so they must not
+// count towards "multi-GPU" either.
+TEST_CASE("GpuBalancer reports whether sessions can be placed on more than one GPU", "[gpu_balancer]") {
+  SECTION("a single-node pool is not multi-GPU") {
+    GpuBalancer single;
+    single.pool["/dev/dri/renderD128"] = GpuInfo{.weight = 1, .excluded = false};
+    REQUIRE(single.usable_node_count() == 1);
+    REQUIRE(single.is_multi_gpu() == false);
+  }
+
+  SECTION("an empty pool is not multi-GPU") {
+    GpuBalancer empty;
+    REQUIRE(empty.usable_node_count() == 0);
+    REQUIRE(empty.is_multi_gpu() == false);
+  }
+
+  SECTION("two usable nodes are multi-GPU") {
+    auto balancer = make_balancer();
+    REQUIRE(balancer.usable_node_count() == 2);
+    REQUIRE(balancer.is_multi_gpu() == true);
+  }
+
+  SECTION("an excluded node does not make the pool multi-GPU") {
+    auto balancer = make_balancer();
+    balancer.pool["/dev/dri/renderD136"].excluded = true;
+    REQUIRE(balancer.usable_node_count() == 1);
+    REQUIRE(balancer.is_multi_gpu() == false);
+  }
+
+  SECTION("exclusion leaves a pool at one usable node even with several nodes present") {
+    GpuBalancer balancer;
+    balancer.pool["/dev/dri/renderD128"] = GpuInfo{.weight = 1, .excluded = false};
+    balancer.pool["/dev/dri/renderD136"] = GpuInfo{.weight = 1, .excluded = true};
+    balancer.pool["/dev/dri/renderD137"] = GpuInfo{.weight = 1, .excluded = true};
+    REQUIRE(balancer.usable_node_count() == 1);
+    REQUIRE(balancer.is_multi_gpu() == false);
+  }
+}
+
 TEST_CASE("pick_and_acquire reserves atomically and skips unusable nodes", "[gpu_balancer]") {
   auto make_pool = [] {
     auto bal = std::make_shared<immer::atom<GpuBalancer>>(GpuBalancer{});

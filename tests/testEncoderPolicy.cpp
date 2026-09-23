@@ -179,3 +179,27 @@ TEST_CASE("producer_buffer_caps_for maps encoder kinds to caps", "[encoder]") {
   REQUIRE(producer_buffer_caps_for(EncoderKind::QuickSync, {"NV12"}) ==
           "video/x-raw(memory:DMABuf), drm-format={NV12}");
 }
+
+// A lobby's desktop is shared by sessions the load balancer may place on different GPUs, so its
+// device-local frames would be unreadable by a consumer on another node (black screen on join).
+TEST_CASE("a shared desktop drops device-local caps when more than one GPU can host a session", "[encoder]") {
+  SECTION("single GPU keeps the configured zero-copy caps") {
+    REQUIRE(shared_desktop_producer_buffer_caps("video/x-raw(memory:CUDAMemory)", /*multi_gpu=*/false) ==
+            "video/x-raw(memory:CUDAMemory)");
+    REQUIRE(shared_desktop_producer_buffer_caps("video/x-raw(memory:DMABuf), drm-format={NV12}",
+                                                /*multi_gpu=*/false) ==
+            "video/x-raw(memory:DMABuf), drm-format={NV12}");
+  }
+
+  SECTION("more than one GPU forces GPU-agnostic system memory") {
+    REQUIRE(shared_desktop_producer_buffer_caps("video/x-raw(memory:CUDAMemory)", /*multi_gpu=*/true) ==
+            "video/x-raw");
+    REQUIRE(shared_desktop_producer_buffer_caps("video/x-raw(memory:DMABuf), drm-format={NV12}", /*multi_gpu=*/true) ==
+            "video/x-raw");
+  }
+
+  SECTION("an already system-memory configuration is unchanged") {
+    REQUIRE(shared_desktop_producer_buffer_caps("video/x-raw", /*multi_gpu=*/true) == "video/x-raw");
+    REQUIRE(shared_desktop_producer_buffer_caps("video/x-raw", /*multi_gpu=*/false) == "video/x-raw");
+  }
+}

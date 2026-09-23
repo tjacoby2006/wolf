@@ -162,4 +162,23 @@ std::string scope_pipeline_to_node(const std::string &pipeline,
  */
 std::string producer_buffer_caps_for(EncoderKind kind, const std::vector<std::string> &dma_formats);
 
+/**
+ * The caps a *shared* desktop's `waylanddisplaysrc` should emit.
+ *
+ * The zero-copy caps (`CUDAMemory`/`DMABuf`) are device-local: the buffer belongs to one GPU, and an
+ * encoder scoped to another GPU cannot address it (which is how a joining client ends up with a black
+ * screen even though negotiation "succeeds"). A shared desktop — a lobby — is consumed by several
+ * sessions, and the load balancer is free to place each of them on a different GPU, so it cannot
+ * assume any single device for its consumers.
+ *
+ * On a single-GPU host there is only one device to share, so the configured (zero-copy) caps are kept
+ * verbatim. As soon as the pool can place more than one session on a different node, the desktop falls
+ * back to GPU-agnostic system memory (`video/x-raw`): each consumer then uploads to its own device
+ * (`cudaupload`, `vapostproc`), which is exactly the non-zero-copy path the encoders already support.
+ *
+ * @param configured_caps  the caps the encoder kind would normally want (may be zero-copy)
+ * @param multi_gpu        true when more than one GPU can host a session
+ */
+std::string shared_desktop_producer_buffer_caps(const std::string &configured_caps, bool multi_gpu);
+
 } // namespace wolf::platform

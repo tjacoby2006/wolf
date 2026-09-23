@@ -184,4 +184,12 @@ std::string producer_buffer_caps_for(EncoderKind kind, const std::vector<std::st
   return "video/x-raw";
 }
 
+std::string shared_desktop_producer_buffer_caps(const std::string &configured_caps, bool multi_gpu) {
+  if (!multi_gpu) {
+    return configured_caps;
+  }
+  // The desktop is shared, so no single device can be assumed for every consumer.
+  return "video/x-raw";
+}
+
 } // namespace wolf::platform

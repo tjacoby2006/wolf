@@ -110,6 +110,17 @@ weights/exclusions. The default `WOLF_RENDER_NODE` is always included so single-
     `start_virtual_compositor` (i.e. the compositor-running session a lobby is created from). That session
     is then resolved exactly like an explicit `session_id`. If zero or more than one such session exists
     the request is genuinely ambiguous and the lobby load-balances as before.
+  - **A shared desktop cannot emit device-local memory (multi-GPU)**: `preferred_render_node` only keeps
+    the *creator* on the lobby's GPU. A *joining* session gets its own `assigned_render_node` from the
+    balancer, and its encoder pipeline is built once at RTSP ANNOUNCE scoped to that node
+    (`rtsp/commands.hpp::announce` -> `start_streaming_video` -> `scope_pipeline_to_node`). There is no
+    re-negotiation on join, so a joiner on another GPU would read `CUDAMemory`/`DMABuf` produced by the
+    lobby's compositor on the creator's GPU and fail (black screen). Since the pool can place joiners
+    anywhere, the lobby's producer instead emits GPU-agnostic system memory when the pool has more than
+    one *usable* node: `GpuBalancer::is_multi_gpu()` -> `MoonlightLobbyRuntime::producer_buffer_caps()`
+    -> `wolf::platform::shared_desktop_producer_buffer_caps()`. The same caps are put in `RunnerArgs`
+    (i.e. `WOLF_VIDEO_BUFFER_CAPS`) so the container agrees with the compositor. A session's *own*
+    desktop keeps its configured caps (same node as its encoder, so still zero-copy).
 
 ### Per-GPU container scoping (the correctness crux)
 Today [`RunDocker::run`](src/moonlight-server/runners/docker.cpp:86) sets `NVIDIA_VISIBLE_DEVICES=all` and

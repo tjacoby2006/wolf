@@ -42,6 +42,26 @@ struct GpuBalancer {
   }
 
   /**
+   * How many nodes a session could actually be placed on: the non-excluded pool.
+   *
+   * Excluded nodes are never handed out (see `pick`), so they do not make the fleet "multi-GPU" for
+   * the purposes of buffer sharing; counting them would needlessly push a single-GPU host onto the
+   * system-memory path.
+   */
+  std::size_t usable_node_count() const {
+    return std::count_if(pool.begin(), pool.end(), [](const auto &entry) { return !entry.second.excluded; });
+  }
+
+  /**
+   * @return true when sessions can be spread over more than one GPU.
+   *
+   * A shared desktop (a lobby) is consumed by several sessions, and the load balancer may place each
+   * of them on a different node. The desktop's producer then cannot emit device-local memory, because
+   * a consumer on another GPU could not address it (see `shared_desktop_producer_buffer_caps`).
+   */
+  bool is_multi_gpu() const { return usable_node_count() > 1; }
+
+  /**
    * Pick a render node for a new container by minimising `(usage[node] + 1) / weight[node]` across
    * the non-excluded pool, so that a higher-weighted GPU (e.g. an RTX 3090 vs a 1660) genuinely
    * takes more apps before we spill over to the others.
