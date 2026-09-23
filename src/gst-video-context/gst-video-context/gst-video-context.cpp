@@ -16,6 +16,11 @@ using cuda_context_ptr = std::shared_ptr<GstCudaContext>;
 
 struct GstVideoContext {
   cuda_context_ptr cuda_context;
+  // Our OWN reference to the GstContext. `gst_element_set_context()` is (transfer full), so every
+  // element we hand it to consumes a separate ref (see `set_context`/`need_context_for_device`);
+  // this base ref keeps the mini-object alive for the lifetime of the cache entry, which is reused
+  // by later sessions on the same render node. The cache lives for the process lifetime, so the ref
+  // is intentionally never released.
   GstContext *context;
 };
 
@@ -147,7 +152,10 @@ bool set_context(gst_context_ptr context, GstMessage *msg) {
     gst_message_parse_context_type(msg, &context_type);
 
     if (g_strcmp0(context_type, GST_CUDA_CONTEXT_TYPE) == 0) {
-      gst_element_set_context(GST_ELEMENT(GST_MESSAGE_SRC(msg)), context->context);
+      // `gst_element_set_context()` is (transfer full): it consumes a reference on the GstContext.
+      // This context is cached per render node and handed to every element that asks, in every
+      // pipeline, for the lifetime of the process - so each handoff must carry its own ref.
+      gst_element_set_context(GST_ELEMENT(GST_MESSAGE_SRC(msg)), gst_context_ref(context->context));
       return true;
     }
     logs::log(logs::debug, "Received NEED_CONTEXT for type {}, but it is not supported", context_type);
@@ -175,7 +183,12 @@ gst_context_ptr need_context_for_device(const std::string &device_path, GstMessa
     if (g_strcmp0(context_type, GST_CUDA_CONTEXT_TYPE) == 0) {
       if (auto cuda_context = create_cuda_context(device_path)) {
         auto context = gst_context_new_cuda_context(cuda_context.get());
-        gst_element_set_context(GST_ELEMENT(GST_MESSAGE_SRC(msg)), context);
+        // We own the single ref returned by `gst_context_new_cuda_context()` and keep it in the
+        // cached `GstVideoContext` for the lifetime of the process (the cache is never cleared).
+        // `gst_element_set_context()` is (transfer full), so the element that just asked needs its
+        // OWN ref - hence the extra `gst_context_ref()`. Passing the base ref here would let the
+        // first element's disposal free a context the cache still hands out.
+        gst_element_set_context(GST_ELEMENT(GST_MESSAGE_SRC(msg)), gst_context_ref(context));
         logs::log(logs::debug, "Created CUDA context for device: {}", device_path);
         return std::make_shared<GstVideoContext>(GstVideoContext{
             .cuda_context = std::move(cuda_context),
