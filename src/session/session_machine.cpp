@@ -70,7 +70,16 @@ Transition step(const SessionModel &model, const SessionInput &input) {
   }
 
   // A stop request is valid from any non-terminal state and always wins.
+  //
+  // A stop that arrives while we are *already* stopping is ignored. Tearing the session down fires
+  // a `StopStreamEvent` so that its producer/encoder pipelines and its runner are released (see the
+  // runtime's `teardown`), and the bus routes that event straight back here as another
+  // `StopRequested`. Without this guard the teardown would re-enter itself and re-emit
+  // `ReleaseGpu`, double-releasing the render node from the balancer.
   if (std::holds_alternative<StopRequested>(input)) {
+    if (model.state == SessionState::Stopping) {
+      return ignore(model);
+    }
     return stop(model, std::get<StopRequested>(input).reason);
   }
 

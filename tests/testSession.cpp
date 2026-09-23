@@ -169,6 +169,26 @@ TEST_CASE("runner exit stops the session", "[session]") {
   REQUIRE(has<Teardown>(t.effects));
 }
 
+TEST_CASE("a stop that races the teardown is ignored", "[session]") {
+  // Regression: `MoonlightSessionRuntime::teardown` fires a `StopStreamEvent` so the session's
+  // producer/encoder pipelines and runner are released (otherwise the container exiting leaves
+  // them running, the stream never terminates for the client, and the next launch collides on the
+  // non-unique interpipe node name -> black screen). The bus routes that event straight back here
+  // as a second `StopRequested`; it must not re-run the teardown, whose `ReleaseGpu` would
+  // double-release the render node from the balancer.
+  auto model = new_session();
+  model.state = SessionState::Streaming;
+
+  auto t = step(model, StopRequested{.reason = "client left"});
+  REQUIRE(t.model.state == SessionState::Stopping);
+  REQUIRE(has<Teardown>(t.effects));
+  REQUIRE(has<ReleaseGpu>(t.effects));
+
+  t = step(t.model, StopRequested{.reason = "stop stream event"});
+  REQUIRE(t.model.state == SessionState::Stopping);
+  REQUIRE(t.effects.empty());
+}
+
 TEST_CASE("out-of-order inputs are ignored, not fatal", "[session]") {
   auto model = new_session(); // Created
 

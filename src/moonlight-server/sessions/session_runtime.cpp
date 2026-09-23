@@ -288,6 +288,28 @@ void MoonlightSessionRuntime::teardown(std::uint64_t session_id, const std::stri
   auto app_state = context_.app_state;
   auto session = context_.stream_session;
 
+  // Stop this session's pipelines and runner *before* dropping the compositor.
+  //
+  // The video/audio producers (`waylanddisplaysrc`/`pulsesrc` feeding the `interpipesink`s
+  // registered as `<session_id>_video`/`<session_id>_audio`) and the encoder pipelines only ever
+  // stop on a `StopStreamEvent` (they send EOS to their own pipelines in their bus handlers).
+  // Without it the producer keeps running for the rest of the process lifetime: the client never
+  // receives a terminate packet (the stream appears to hang after the container exits), the GPU
+  // render node stays pinned, and — because `session_id` is derived from the client — the *next*
+  // launch of the same client registers its `interpipesink` under the same name, which interpipe
+  // rejects ("Could not add node ..., it is not unique"). The new encoder's `interpipesrc` then
+  // binds to the stale, dead producer instead of the new compositor: a black screen.
+  //
+  // The fire is guarded on the session still being published, which is exactly the condition
+  // "this teardown was started from inside Wolf rather than by a `StopStreamEvent`".
+  // `moonlight.cpp`'s handler routes a `StopStreamEvent` straight back here as a `StopRequested`;
+  // without the guard (and the session machine ignoring a stop that arrives while already
+  // `Stopping`) the teardown would re-enter itself and double-release the render node.
+  if (state::get_session_by_id(app_state->running_sessions->load().get(), session_id)) {
+    app_state->event_bus->fire_event(
+        immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session_id}));
+  }
+
   // Drop the Wayland display so the compositor is destroyed.
   session->wayland_display->store(nullptr);
 
