@@ -137,6 +137,10 @@ void MoonlightLobbyRuntime::start_runner(const std::string &render_node) {
   auto app_state = context_.app_state;
   auto audio_server = context_.audio_server;
   auto runtime_dir = context_.runtime_dir;
+  // The runner runs inside the shared desktop, so it has to be told the same caps the compositor
+  // produces (exposed to the container as WOLF_VIDEO_BUFFER_CAPS); otherwise the app would render
+  // expecting device-local memory the compositor is no longer emitting.
+  auto buffer_caps = producer_buffer_caps();
 
   // Create the shared audio virtual sink and start the audio producer before the runner comes up.
   if (audio_server && audio_server->server) {
@@ -157,8 +161,10 @@ void MoonlightLobbyRuntime::start_runner(const std::string &render_node) {
     }).detach();
   }
 
-  // The runner blocks for the container's lifetime, so run it off the actor's thread.
-  std::thread([self = shared_from_this(), lobby, settings, app_state, audio_server, runtime_dir, render_node]() {
+  // The runner blocks for the container's lifetime, so run it off the actor's thread. The thread
+  // holds a shared_ptr to this runtime so it stays alive even if the actor is torn down first.
+  auto self = shared_from_this();
+  std::thread([self, lobby, settings, app_state, audio_server, runtime_dir, render_node, buffer_caps]() {
     auto host = app_state->host;
     auto full_path = std::filesystem::path(host->local_base_state_folder) / settings->runner_state_folder;
     std::filesystem::create_directories(full_path);
@@ -170,11 +176,6 @@ void MoonlightLobbyRuntime::start_runner(const std::string &render_node) {
     if (settings->on_setup_over.get()) {
       settings->on_setup_over.get()->set_value(true);
     }
-
-    // The runner runs inside the shared desktop, so it has to be told the same caps the compositor
-    // produces (exposed to the container as WOLF_VIDEO_BUFFER_CAPS); otherwise the app would render
-    // expecting device-local memory the compositor is no longer emitting.
-    auto buffer_caps = self->producer_buffer_caps();
 
     wolf::core::sessions::start_runner(
         lobby->runner,
