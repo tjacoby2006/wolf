@@ -7,12 +7,30 @@ namespace wolf::session {
 
 namespace {
 
-/** Build a `TeardownLobby` + `ReleaseLobbyGpu` pair for a lobby that is going away. */
-std::vector<LobbyEffect> teardown_effects(const std::string &lobby_id, std::string reason) {
-  return {
-      TeardownLobby{.lobby_id = lobby_id, .reason = std::move(reason)},
-      ReleaseLobbyGpu{.lobby_id = lobby_id},
-  };
+/**
+ * Build the effects for a lobby that is going away: every connected session is detached *first*
+ * (switching its input/audio/video back to its own desktop) and only then is the shared compositor
+ * torn down.
+ *
+ * The detach has to be part of the teardown itself rather than of one specific input. A lobby can be
+ * torn down by an explicit stop, by its runner exiting (the user quitting the app), or by a failed
+ * desktop, and any path that drops `wayland_display` without re-binding the sessions leaves them
+ * pointing at a destroyed compositor: the client keeps encoding from a dead interpipe source (a
+ * permanent black screen) and its mouse/keyboard events are sent to a wayland display that no longer
+ * exists (input appears dead until the client reconnects).
+ *
+ * Always read the sessions off `model`, never off `next`: as documented on `LobbyTransition`, the
+ * moved-from `next` is only safe to read for members the transition does not touch.
+ */
+std::vector<LobbyEffect> teardown_effects(const LobbyModel &model, std::string reason) {
+  std::vector<LobbyEffect> effects;
+  effects.reserve(model.connected_sessions.size() + 2);
+  for (auto session_id : model.connected_sessions) {
+    effects.push_back(DetachSession{.lobby_id = model.lobby_id, .session_id = session_id});
+  }
+  effects.push_back(TeardownLobby{.lobby_id = model.lobby_id, .reason = std::move(reason)});
+  effects.push_back(ReleaseLobbyGpu{.lobby_id = model.lobby_id});
+  return effects;
 }
 
 /** Move to `Failed`, tearing down whatever was already started. */
@@ -20,31 +38,14 @@ LobbyTransition fail(const LobbyModel &model, std::string reason) {
   auto next = model;
   next.state = LobbyState::Failed;
   next.failure_reason = reason;
-  return LobbyTransition{.model = std::move(next),
-                         .effects = teardown_effects(model.lobby_id, std::move(reason))};
+  return LobbyTransition{.model = std::move(next), .effects = teardown_effects(model, std::move(reason))};
 }
 
 /** Move to `Stopping`, asking the runtime to tear everything down. */
 LobbyTransition stop(const LobbyModel &model, std::string reason) {
   auto next = model;
   next.state = LobbyState::Stopping;
-  return LobbyTransition{.model = std::move(next),
-                         .effects = teardown_effects(model.lobby_id, std::move(reason))};
-}
-
-/**
- * Move to `Stopping`, first detaching every connected session (so their input/audio/video is
- * switched back to their own desktop) and then tearing the shared desktop down.
- */
-LobbyTransition stop_with_detach(const LobbyModel &model, std::string reason) {
-  auto transition = stop(model, std::move(reason));
-  std::vector<LobbyEffect> detaches;
-  detaches.reserve(model.connected_sessions.size());
-  for (auto session_id : model.connected_sessions) {
-    detaches.push_back(DetachSession{.lobby_id = model.lobby_id, .session_id = session_id});
-  }
-  transition.effects.insert(transition.effects.begin(), detaches.begin(), detaches.end());
-  return transition;
+  return LobbyTransition{.model = std::move(next), .effects = teardown_effects(model, std::move(reason))};
 }
 
 /** No-op transition: ignore an input that is not valid in the current state. */
@@ -71,10 +72,20 @@ LobbyTransition step_lobby(const LobbyModel &model, const LobbyInput &input) {
     return ignore(model);
   }
 
-  // A stop request is valid from any non-terminal state and always wins. Every connected session
-  // is detached first so its input/audio/video is switched back before the desktop goes away.
+  // A stop request is valid from any state that is not already stopping, and it wins over every
+  // other input. Every connected session is detached first so its input/audio/video is switched back
+  // before the desktop goes away.
+  //
+  // A stop that arrives while we are *already* stopping is ignored. Tearing the lobby down fires a
+  // `StopLobbyEvent` so that its own producer pipelines and runner are released (see the runtime's
+  // `teardown`), and the bus routes that event straight back here as another `StopLobby`. Without
+  // this guard the teardown would re-enter itself, re-emitting every `DetachSession` and re-plugging
+  // the sessions' joypads into their own runners.
   if (std::holds_alternative<StopLobby>(input)) {
-    return stop_with_detach(model, std::get<StopLobby>(input).reason);
+    if (model.state == LobbyState::Stopping) {
+      return ignore(model);
+    }
+    return stop(model, std::get<StopLobby>(input).reason);
   }
 
   // A desktop failure is fatal from any state that is still waiting on the compositor.
@@ -144,8 +155,9 @@ LobbyTransition step_lobby(const LobbyModel &model, const LobbyInput &input) {
           std::remove(next.connected_sessions.begin(), next.connected_sessions.end(), session_id),
           next.connected_sessions.end());
 
-      // The last session left and the lobby is set to stop when everyone leaves. The session is
-      // still detached first (input/audio/video switched back), then the lobby tears down.
+      // The last session left and the lobby is set to stop when everyone leaves. `next` no longer
+      // lists the leaving session, so its detach is added explicitly (input/audio/video switched
+      // back) before the teardown the `stop` helper builds.
       if (next.connected_sessions.empty() && model.stop_when_everyone_leaves) {
         auto transition = stop(next, "last session left");
         transition.effects.insert(transition.effects.begin(),
@@ -156,6 +168,8 @@ LobbyTransition step_lobby(const LobbyModel &model, const LobbyInput &input) {
                              .effects = {DetachSession{.lobby_id = model.lobby_id, .session_id = session_id}}};
     }
     if (std::holds_alternative<LobbyRunnerExited>(input)) {
+      // The user quit the app, so the runner is gone: detach every joined session back to its own
+      // desktop before the shared compositor is dropped (see `teardown_effects`).
       return stop(model, "runner exited");
     }
     return ignore(model);

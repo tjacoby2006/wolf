@@ -39,8 +39,12 @@ struct LobbyContext {
  *   StartLobbyRunner  -> sessions::start_runner (blocking)      -> LobbyRunnerStarted / LobbyRunnerExited
  *   AttachSession     -> switch input/audio/video to the lobby  -> (no feedback)
  *   DetachSession     -> switch input/audio/video back          -> (no feedback)
- *   TeardownLobby     -> drop display, remove lobby             -> LobbyTeardownComplete
+ *   TeardownLobby     -> stop producers + runner, drop display  -> LobbyTeardownComplete
  *   ReleaseLobbyGpu   -> gpu_balancer.release                   -> (no feedback)
+ *
+ * `TeardownLobby` fires a `StopLobbyEvent` (so the lobby's own `<lobby_id>_video`/`_audio` producers
+ * and its runner are released) before it drops the compositor; the bus routes that event back in as a
+ * `StopLobby`, which the state machine ignores once it is already stopping.
  *
  * Long-running work (compositor startup, the runner itself) happens on detached threads so the
  * actor's own thread is never blocked; the actor stays responsive to stop requests throughout.

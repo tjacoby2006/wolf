@@ -292,6 +292,26 @@ void MoonlightLobbyRuntime::teardown(const std::string &reason) {
   auto lobby = context_.lobby;
   logs::log(logs::debug, "[LOBBY] Tearing down lobby {}: {}", lobby->id, reason);
 
+  // Stop the lobby's own pipelines and runner *before* dropping the compositor.
+  //
+  // The lobby's video/audio producers are registered under the lobby id (`<lobby_id>_video` and
+  // `<lobby_id>_audio`), and they only ever listen for `StopLobbyEvent` (the other handler,
+  // `StopStreamEvent`, carries a *session* id and can never match). Dropping `wayland_display`
+  // destroys the compositor behind `waylanddisplaysrc`, but without an EOS the pipeline itself — and
+  // the GPU render node it holds — keeps running for the rest of the process lifetime. The same event
+  // also reaches the runner's stop handler, releasing the container/process (and its GPU memory).
+  //
+  // The fire is guarded on the lobby still being published, which is exactly the condition "this
+  // teardown was started from inside Wolf rather than by a `StopLobbyEvent`". `wolf.cpp`'s
+  // `stop_all_sessions` fires `StopLobbyEvent` for every lobby at shutdown, and the bus routes that
+  // straight back here as a `StopLobby`; an unguarded fire would re-enter teardown and emit a second
+  // `ReleaseLobbyGpu`, double-releasing the render node from the balancer.
+  auto lobbies = context_.app_state->lobbies->load();
+  if (state::get_lobby_by_id(lobbies.get(), lobby->id).has_value()) {
+    context_.app_state->event_bus->fire_event(
+        immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby->id}});
+  }
+
   // Drop the shared wayland display so the compositor is destroyed.
   lobby->wayland_display->store(nullptr);
 

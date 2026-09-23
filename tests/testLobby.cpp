@@ -205,6 +205,90 @@ TEST_CASE("runner exit stops the lobby", "[lobby]") {
   auto t = step_lobby(model, LobbyRunnerExited{.exit_code = 0});
   REQUIRE(t.model.state == LobbyState::Stopping);
   REQUIRE(has<TeardownLobby>(t.effects));
+  REQUIRE(has<ReleaseLobbyGpu>(t.effects));
+
+  t = step_lobby(t.model, LobbyTeardownComplete{});
+  REQUIRE(t.model.state == LobbyState::Stopped);
+}
+
+/*
+ * The user quitting the app makes the lobby's runner exit. Any session that joined has its
+ * mouse/keyboard/touch and its audio/video producers pointed at the lobby's compositor, so it must be
+ * detached *before* the compositor is dropped: otherwise the client keeps encoding from a dead
+ * interpipe source (a black screen) and sends input to a wayland display that no longer exists (the
+ * UI stops reacting to mouse and keyboard).
+ */
+TEST_CASE("runner exit detaches connected sessions before tearing down", "[lobby]") {
+  auto model = running_lobby();
+  model = advance_lobby(model, SessionJoined{.session_id = 10});
+  model = advance_lobby(model, SessionJoined{.session_id = 20});
+
+  auto t = step_lobby(model, LobbyRunnerExited{.exit_code = 0});
+  REQUIRE(t.model.state == LobbyState::Stopping);
+  REQUIRE(has<DetachSession>(t.effects));
+  REQUIRE(has<TeardownLobby>(t.effects));
+
+  // Both sessions are detached, and every detach comes before the teardown so the sessions are
+  // switched back while the shared compositor is still alive.
+  std::size_t detaches = 0;
+  for (const auto &effect : t.effects) {
+    if (std::holds_alternative<DetachSession>(effect)) {
+      ++detaches;
+    }
+  }
+  REQUIRE(detaches == 2);
+  REQUIRE(std::holds_alternative<DetachSession>(t.effects[0]));
+  REQUIRE(std::holds_alternative<DetachSession>(t.effects[1]));
+  REQUIRE(std::holds_alternative<TeardownLobby>(t.effects[2]));
+}
+
+TEST_CASE("every teardown path detaches the connected sessions first", "[lobby]") {
+  auto with_two_sessions = [] {
+    auto model = running_lobby();
+    model = advance_lobby(model, SessionJoined{.session_id = 10});
+    return advance_lobby(model, SessionJoined{.session_id = 20});
+  };
+
+  // An explicit stop, the runner exiting (the app quit) and a desktop failure all end the lobby, and
+  // all of them have to hand the sessions back to their own desktop before the shared one goes away.
+  std::vector<LobbyTransition> transitions;
+  transitions.push_back(step_lobby(with_two_sessions(), StopLobby{.reason = "shutdown"}));
+  transitions.push_back(step_lobby(with_two_sessions(), LobbyRunnerExited{.exit_code = 0}));
+  transitions.push_back(step_lobby(with_two_sessions(), LobbyDesktopFailed{.reason = "compositor panicked"}));
+
+  for (const auto &t : transitions) {
+    // Detaches are emitted first, then the teardown, so the switch back happens against a live display.
+    REQUIRE(t.effects.size() == 4);
+    REQUIRE(std::holds_alternative<DetachSession>(t.effects[0]));
+    REQUIRE(std::holds_alternative<DetachSession>(t.effects[1]));
+    REQUIRE(std::holds_alternative<TeardownLobby>(t.effects[2]));
+    REQUIRE(std::holds_alternative<ReleaseLobbyGpu>(t.effects[3]));
+  }
+}
+
+/*
+ * Tearing a lobby down fires a `StopLobbyEvent` so that its own video/audio producers and its runner
+ * are released (they are registered under the lobby id and only listen for that event). The event bus
+ * then routes the event straight back into the actor as another `StopLobby`, so the second stop has to
+ * be a no-op: re-entering teardown would re-emit every `DetachSession` — re-plugging the sessions'
+ * joypads into their own runners — and a second `ReleaseLobbyGpu`, double-releasing the render node.
+ */
+TEST_CASE("a stop that races the teardown is ignored", "[lobby]") {
+  auto model = running_lobby();
+  model = advance_lobby(model, SessionJoined{.session_id = 10});
+
+  auto t = step_lobby(model, StopLobby{.reason = "stop lobby event"});
+  REQUIRE(t.model.state == LobbyState::Stopping);
+  REQUIRE(has<TeardownLobby>(t.effects));
+
+  // The teardown's own `StopLobbyEvent` comes back as a second stop: it must not re-emit anything.
+  auto again = step_lobby(t.model, StopLobby{.reason = "stop lobby event"});
+  REQUIRE(again.model.state == LobbyState::Stopping);
+  REQUIRE(again.effects.empty());
+
+  // The teardown still completes normally.
+  auto done = step_lobby(again.model, LobbyTeardownComplete{});
+  REQUIRE(done.model.state == LobbyState::Stopped);
 }
 
 TEST_CASE("desktop failure is fatal and tears down", "[lobby]") {
