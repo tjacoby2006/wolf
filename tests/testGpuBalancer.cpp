@@ -19,7 +19,7 @@ TEST_CASE("GpuBalancer picks the least-loaded GPU by usage/weight", "[gpu_balanc
   auto balancer = make_balancer();
 
   SECTION("empty pool picks the first node (deterministic)") {
-    REQUIRE(balancer.pick(std::nullopt) == "/dev/dri/renderD128");
+    REQUIRE(balancer.pick() == "/dev/dri/renderD128");
   }
 
   SECTION("higher-weight GPU takes more apps before spilling over") {
@@ -27,30 +27,30 @@ TEST_CASE("GpuBalancer picks the least-loaded GPU by usage/weight", "[gpu_balanc
     // start: 128=0 (score 0), 136=0 (score 0) -> tie broken by usage then path -> 128
     auto b = balancer.acquire("/dev/dri/renderD128");
     // 128=1 (score 0.25), 136=0 (score 0) -> 136 wins
-    REQUIRE(b.pick(std::nullopt) == "/dev/dri/renderD136");
+    REQUIRE(b.pick() == "/dev/dri/renderD136");
 
     b = b.acquire("/dev/dri/renderD136");
     // 128=1 (0.25), 136=1 (1.0) -> 128 wins again
-    REQUIRE(b.pick(std::nullopt) == "/dev/dri/renderD128");
+    REQUIRE(b.pick() == "/dev/dri/renderD128");
 
     b = b.acquire("/dev/dri/renderD128");
     // 128=2 (0.5), 136=1 (1.0) -> 128 wins
-    REQUIRE(b.pick(std::nullopt) == "/dev/dri/renderD128");
+    REQUIRE(b.pick() == "/dev/dri/renderD128");
 
     b = b.acquire("/dev/dri/renderD128");
     // 128=3 (0.75), 136=1 (1.0) -> 128 still wins (weight lets it take 4 before spilling)
-    REQUIRE(b.pick(std::nullopt) == "/dev/dri/renderD128");
+    REQUIRE(b.pick() == "/dev/dri/renderD128");
 
     b = b.acquire("/dev/dri/renderD128");
     // 128=4 (1.0), 136=1 (1.0) -> tie broken by lowest usage -> 136
-    REQUIRE(b.pick(std::nullopt) == "/dev/dri/renderD136");
+    REQUIRE(b.pick() == "/dev/dri/renderD136");
   }
 
   SECTION("a freed GPU is reused before assigning to another") {
     auto b = balancer.acquire("/dev/dri/renderD128").acquire("/dev/dri/renderD136");
     // Both at usage 1; releasing one makes it the clear favourite
     b = b.release("/dev/dri/renderD128");
-    REQUIRE(b.pick(std::nullopt) == "/dev/dri/renderD128");
+    REQUIRE(b.pick() == "/dev/dri/renderD128");
   }
 
   SECTION("release floors at zero and is idempotent below zero") {
@@ -61,29 +61,12 @@ TEST_CASE("GpuBalancer picks the least-loaded GPU by usage/weight", "[gpu_balanc
   }
 }
 
-TEST_CASE("GpuBalancer honours pinned GPUs", "[gpu_balancer]") {
-  auto balancer = make_balancer();
-
-  SECTION("pin to an available node returns that node regardless of load") {
-    auto b = balancer.acquire("/dev/dri/renderD128").acquire("/dev/dri/renderD136");
-    REQUIRE(b.pick(std::optional<std::string>("/dev/dri/renderD136")) == "/dev/dri/renderD136");
-  }
-
-  SECTION("pin to an unknown node returns nullopt") {
-    REQUIRE(balancer.pick(std::optional<std::string>("/dev/dri/renderD999")).has_value() == false);
-  }
-}
-
 TEST_CASE("GpuBalancer excludes GPUs from the pool", "[gpu_balancer]") {
   auto balancer = make_balancer();
   balancer.pool["/dev/dri/renderD128"].excluded = true;
 
   SECTION("excluded node is never picked") {
-    REQUIRE(balancer.pick(std::nullopt) == "/dev/dri/renderD136");
-  }
-
-  SECTION("pin to an excluded node returns nullopt") {
-    REQUIRE(balancer.pick(std::optional<std::string>("/dev/dri/renderD128")).has_value() == false);
+    REQUIRE(balancer.pick() == "/dev/dri/renderD136");
   }
 
   SECTION("is_available reflects exclusion") {

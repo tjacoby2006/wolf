@@ -39,24 +39,13 @@ struct GpuBalancer {
   }
 
   /**
-   * Pick a render node for a new container.
-   *
-   * If `pinned_node` is set, that node is used (provided it exists and isn't excluded).
-   * Otherwise we minimise `usage[node] / weight[node]` across the non-excluded pool so that:
+   * Pick a render node for a new container by minimising `usage[node] / weight[node]` across the
+   * non-excluded pool so that:
    *  - a now-free GPU (usage dropped to 0) is preferred over round-robin, and
    *  - a higher-weighted GPU (e.g. an RTX 3090 vs a 1660) takes more apps before we spill over.
    * Ties are broken by lowest absolute usage, then by node path for determinism.
    */
-  std::optional<std::string> pick(const std::optional<std::string> &pinned_node) const {
-    if (pinned_node.has_value()) {
-      auto node = *pinned_node;
-      if (is_available(node)) {
-        return node;
-      }
-      logs::log(logs::error, "Requested GPU {} is not in the pool or is excluded", node);
-      return std::nullopt;
-    }
-
+  std::optional<std::string> pick() const {
     std::optional<std::string> best;
     double best_score = 0.0;
     int best_usage = 0;
@@ -91,7 +80,7 @@ struct GpuBalancer {
                 "Preferred GPU {} is not in the pool or is excluded, falling back to load balancing",
                 *preferred_node);
     }
-    return pick(std::nullopt);
+    return pick();
   }
 
   /** Increment the active-container count for `node`. Returns a new snapshot. */

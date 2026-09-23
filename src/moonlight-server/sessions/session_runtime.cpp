@@ -91,12 +91,11 @@ void MoonlightSessionRuntime::assign_gpu(std::uint64_t session_id) {
   auto session = context_.stream_session;
   auto gpu_balancer = context_.app_state->gpu_balancer;
 
-  auto chosen = gpu_balancer->load()->pick(session->app->gpu_pin);
+  auto chosen = gpu_balancer->load()->pick();
   logs::log(logs::info,
-            "[SESSION] Picked GPU {} for session {} (pin={})",
+            "[SESSION] Picked GPU {} for session {}",
             chosen.has_value() ? *chosen : "<none>",
-            session_id,
-            session->app->gpu_pin.has_value() ? *session->app->gpu_pin : "<none>");
+            session_id);
 
   // The pool is discovered at startup and can go stale (GPU reset, driver reload, ...).
   // Handing a dead node to the virtual compositor makes it panic and abort Wolf, so probe first.

@@ -120,7 +120,6 @@ struct BaseApp {
   std::string title;
   std::optional<std::string> icon_png_path;
   std::optional<std::string> render_node;
-  std::optional<std::string> gpu_pin;
   std::optional<BaseAppVideoOverride> video;
   std::optional<BaseAppAudioOverride> audio;
   std::optional<bool> start_virtual_compositor;

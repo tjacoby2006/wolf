@@ -534,16 +534,7 @@ For example, with an RTX 3090 and a 1660 you can send two or more apps to the 30
 excluded_gpus = ["/dev/dri/renderD136"]
 ----
 
-* Per-app pinning — any app can be pinned to a specific GPU with the `gpu_pin` field (a render node path).
-A pinned app always uses that GPU and is not load-balanced. If the pinned GPU is excluded or missing, the app will not start.
-
-[source,toml]
-----
-[[profiles.apps]]
-title = "Steam"
-gpu_pin = "/dev/dri/renderD128"
-# ...
-----
+GPU assignment is decided by Wolf when a session starts and is fixed for the lifetime of that session; there is no per-app pinning.
 
 Lobbies assign a single GPU once at creation (driven by the creating session) and all joining clients share it; the GPU is released when the lobby stops.
 

@@ -70,7 +70,6 @@ struct App {
   std::string av1_gst_pipeline;
 
   std::string render_node;
-  std::optional<std::string> gpu_pin;
 
   std::string opus_gst_pipeline;
   bool start_virtual_compositor;

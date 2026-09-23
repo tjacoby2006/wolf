@@ -177,7 +177,6 @@ parse_apps(const std::vector<BaseApp> &apps,
                         .hevc_gst_pipeline = hevc_gst_pipeline,
                         .av1_gst_pipeline = av1_gst_pipeline,
                         .render_node = app_render_node,
-                        .gpu_pin = app.gpu_pin,
 
                         .opus_gst_pipeline = opus_gst_pipeline,
                         .start_virtual_compositor = app.start_virtual_compositor.value_or(true),

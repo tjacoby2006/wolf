@@ -6,8 +6,12 @@ Requirements:
 - Per-app GPU assignment (not global).
 - Users can **exclude** GPUs from the pool (e.g. an iGPU used for the display).
 - Track **how many containers are using each GPU** and prefer a now-free GPU over round-robin.
-- Allow an app to be **pinned** to a specific GPU.
 - Optional user-supplied **relative performance weight** per GPU (RTX 3090 vs 1660 → send 2+ apps to the 3090 first).
+
+> **Note (removed feature):** a per-app hard *pin* (`gpu_pin`) existed briefly but was removed. It was only
+> useful at the top-level app and a session is stuck with its assigned GPU for its whole lifetime anyway,
+> so load balancing + `excluded_gpus` covers the same ground without it. `GpuBalancer::pick()` therefore
+> takes no pin argument; only the lobby's *soft* preference (`pick_preferring`) remains.
 
 ## Confirmed design decisions
 - Weighting format: top-level `[gpus]` table mapping render-node path -> integer weight.
@@ -30,7 +34,7 @@ Requirements:
 
 ```mermaid
 flowchart TD
-  C[config.toml] -->|gpus table + app gpu_pin| P[parse config]
+  C[config.toml] -->|gpus table + excluded_gpus| P[parse config]
   D[discover /dev/dri pool] --> BAL[GpuBalancer atom]
   P --> BAL
   SS[StreamSession event] -->|acquire app pin| BAL
@@ -52,9 +56,8 @@ Data:
 - `usage`: `map<render_node_path, int /* active container count */>`
 
 API (pure functions over an immutable snapshot; caller swaps in the new one via `atom->update`):
-- `pick(snapshot, pinned_node) -> optional<render_node>`
-  - If `pinned_node` set: return it if present & not excluded (else error/log).
-  - Else: among non-excluded GPUs, minimize `usage[node] / weight[node]`; tie-break by lowest usage,
+- `pick() -> optional<render_node>`
+  - Among non-excluded GPUs, minimize `usage[node] / weight[node]`; tie-break by lowest usage,
     then stable path order. Return best.
 - `acquire(snapshot, node) -> snapshot'` (increments usage)
 - `release(snapshot, node) -> snapshot'` (decrements usage, floor 0)
@@ -67,14 +70,15 @@ weights/exclusions. The default `WOLF_RENDER_NODE` is always included so single-
 - [`WolfConfig`](src/moonlight-server/state/serialised_config.hpp:140): add `std::map<std::string,int> gpus = {}`
   (render node -> weight). A GPU listed with a special sentinel or a parallel `excluded_gpus` list is
   excluded — simplest: keep `[gpus]` for weights and add `excluded_gpus = [...]` array.
-- [`BaseApp`](src/moonlight-server/state/serialised_config.hpp:119): add `std::optional<std::string> gpu_pin`.
+- [`BaseApp`](src/moonlight-server/state/serialised_config.hpp:119): `render_node` is the only GPU-ish field.
 - Bump `config_version` to 8 and extend the migration in
   [`load_or_default`](src/moonlight-server/state/configTOML.cpp:218) (new keys are optional/DefaultIfMissing, so old files load fine).
 - Update the generated default at `state/default/config.v7.toml` with a commented `[gpus]` example.
 
 ### Wiring acquire/release
 - **StreamSession**: in the [`StreamSession` handler](src/moonlight-server/sessions/moonlight.cpp:89),
-  before starting the producer/runner, call `acquire(app->gpu_pin)`, store the chosen node on the
+  before starting the producer/runner, call `acquire(chosen)` for the node from
+  `GpuBalancer::pick()`, store the chosen node on the
   session (new field `assigned_render_node`), and use it for both the Wayland producer and the runner
   args. On [`StopStreamEvent`](src/moonlight-server/sessions/moonlight.cpp:60), call `release`.
 - **Lobby**: in the [`CreateLobbyEvent` handler](src/moonlight-server/sessions/lobbies.cpp:74), acquire once
@@ -109,8 +113,8 @@ Deriving the NVIDIA index/uuid from a render node is a small helper in `platform
   - weight-aware pick (3090 w=4 vs 1660 w=1 → first two apps land on 3090),
   - exclusion honored, pin override, pin to excluded errors,
   - acquire/release refcount reuse (app quits → next app reuses the freed GPU).
-- Add `[gpus]` + `gpu_pin` entries to [`tests/assets/config.test.toml`](tests/assets/config.test.toml) and assert parse.
+- Add `[gpus]` entries to [`tests/assets/config.test.toml`](tests/assets/config.test.toml) and assert parse.
 
 ## Docs
 - [`docs/modules/user/pages/configuration.adoc`](docs/modules/user/pages/configuration.adoc): document `[gpus]`,
-  `excluded_gpus`, and per-app `gpu_pin`.
+  `excluded_gpus`.
