@@ -191,8 +191,8 @@ struct AppState {
   /**
    * A single global Gstreamer video context shared with all the pipelines
    */
-  std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> gst_context =
-      std::make_shared<immer::atom<gst_video_context::gst_context_ptr>>();
+  std::shared_ptr<gst_video_context::GstVideoContextProvider> gst_context_provider =
+      std::make_shared<gst_video_context::GstVideoContextProvider>();
 
   /**
    * A list of all currently running (and paused) streaming sessions

@@ -34,7 +34,7 @@ void start_video_producer(const std::string &session_id,
                           const std::string &buffer_format,
                           const std::string &render_node,
                           const wolf::core::virtual_display::DisplayMode &display_mode,
-                          std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
+                          std::shared_ptr<gst_video_context::GstVideoContextProvider> context_provider,
                           std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready,
                           std::shared_ptr<events::EventBusType> event_bus);
 
@@ -48,7 +48,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
                            const std::shared_ptr<events::EventBusType> &event_bus,
                            std::string client_ip,
                            unsigned short client_port,
-                           std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
+                           std::shared_ptr<gst_video_context::GstVideoContextProvider> context_provider,
                            std::shared_ptr<udp::socket> video_socket);
 
 void start_streaming_audio(immer::box<events::AudioSession> audio_session,

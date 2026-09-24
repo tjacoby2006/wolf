@@ -163,6 +163,26 @@ cuda_context_ptr create_cuda_context(const std::string &device_path) {
   return nullptr;
 }
 
+gst_context_ptr GstVideoContextProvider::get_or_create(const std::string &device_path) {
+  std::lock_guard lock(mutex_);
+  const auto key = getPciBusIdFromDri(device_path).value_or(device_path);
+  if (const auto it = contexts_.find(key); it != contexts_.end()) {
+    logs::log(logs::debug, "Reusing CUDA context for render node {} (GPU key {})", device_path, key);
+    return it->second;
+  }
+
+  auto cuda_context = create_cuda_context(device_path);
+  if (!cuda_context) {
+    return nullptr;
+  }
+  auto context = std::make_shared<GstVideoContext>();
+  context->cuda_context = std::move(cuda_context);
+  context->context = gst_context_new_cuda_context(context->cuda_context.get());
+  contexts_.emplace(key, context);
+  logs::log(logs::info, "Created CUDA context for render node {} (GPU key {})", device_path, key);
+  return context;
+}
+
 gst_context_ptr need_context_for_device(const std::string &device_path, GstMessage *msg) {
   if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_NEED_CONTEXT) {
     const gchar *context_type;

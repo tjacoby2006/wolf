@@ -1,7 +1,9 @@
 #pragma once
 
 #include <gst/gst.h>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace gst_video_context {
@@ -13,6 +15,15 @@ bool init();
 
 struct GstVideoContext;
 using gst_context_ptr = std::shared_ptr<GstVideoContext>;
+
+class GstVideoContextProvider {
+public:
+  gst_context_ptr get_or_create(const std::string &device_path);
+
+private:
+  std::mutex mutex_;
+  std::map<std::string, gst_context_ptr> contexts_;
+};
 
 /**
  * Given a GstMessage will automatically set the context if it's a GST_MESSAGE_NEED_CONTEXT

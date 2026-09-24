@@ -2,6 +2,10 @@
 
 namespace gst_video_context {
 
+gst_context_ptr GstVideoContextProvider::get_or_create(const std::string &) {
+  return nullptr;
+}
+
 struct GstVideoContext {};
 
 bool init() {
