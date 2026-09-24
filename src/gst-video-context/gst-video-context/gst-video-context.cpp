@@ -123,7 +123,8 @@ std::optional<int> getCudaDeviceIndexFromPciBusId(const std::string &pciBusId) {
   return std::nullopt;
 }
 
-std::optional<int> getCudaDeviceFromDri(const fs::path &driPath) {
+std::optional<int> getCudaDeviceFromDri(const std::string &device_path) {
+  const fs::path driPath{device_path};
   auto pciBusId = getPciBusIdFromDri(driPath);
   if (!pciBusId) {
     logs::log(logs::warning, "Failed to get PCI bus ID for device: {}", driPath.string());
