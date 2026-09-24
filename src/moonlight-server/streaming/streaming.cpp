@@ -32,6 +32,16 @@ static std::string bind_encoder_to_render_node(std::string pipeline, std::string
                                   std::regex(fmt::format("va{}enc", technology)),
                                   fmt::format("va{}{}enc", node_name, technology));
   }
+  // GstNv*Enc exposes cuda-device-id as a construct-only property. It must be
+  // present in the launch description; setting it after parsing is rejected.
+  if (const auto cuda_device = gst_video_context::getCudaDeviceFromDri(std::string(render_node))) {
+    if (pipeline.find("cuda-device-id") == std::string::npos) {
+      pipeline = std::regex_replace(pipeline,
+                                    std::regex(R"(\b(nvh(?:264|265|av1)enc)\b)"),
+                                    fmt::format("$1 cuda-device-id={}", *cuda_device),
+                                    std::regex_constants::format_first_only);
+    }
+  }
   return pipeline;
 }
 
@@ -54,7 +64,10 @@ static void bind_cuda_encoder_to_render_node(GstElement *pipeline, const std::st
     }
     if (factory_name && g_str_has_prefix(factory_name, "nvh") &&
         g_object_class_find_property(G_OBJECT_GET_CLASS(element), "cuda-device-id")) {
-      g_object_set(element, "cuda-device-id", *cuda_device, nullptr);
+      GParamSpec *property = g_object_class_find_property(G_OBJECT_GET_CLASS(element), "cuda-device-id");
+      if (property->flags & G_PARAM_WRITABLE) {
+        g_object_set(element, "cuda-device-id", *cuda_device, nullptr);
+      }
       logs::log(logs::debug,
                 "[GSTREAMER] Bound {} encoder to CUDA device {} for render node {}",
                 factory_name,
