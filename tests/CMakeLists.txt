@@ -23,6 +23,7 @@ set(SRC_LIST
         testRTSP.cpp
         testWolfAPI.cpp
         testBatchedSend.cpp)
+list(APPEND SRC_LIST testGPUScheduler.cpp)
 
 option(TEST_RUST_WAYLAND "Test our custom Rust wayland compositor" ON)
 if (UNIX AND NOT APPLE)

@@ -10,6 +10,7 @@
 #include <immer/array.hpp>
 #include <immer/box.hpp>
 #include <memory>
+#include <regex>
 #include <streaming/streaming.hpp>
 #include <thread>
 
@@ -17,6 +18,22 @@ namespace streaming {
 
 using namespace wolf::core::gstreamer;
 using namespace wolf::core;
+
+static std::string bind_encoder_to_render_node(std::string pipeline, std::string_view render_node) {
+  const auto node_name = get_render_node_name(render_node);
+  if (node_name.empty() || node_name == "renderD128") {
+    return pipeline;
+  }
+  // VAAPI exposes per-render-node element names (for example
+  // varenderD129h264enc). The config is generated once at startup, so bind
+  // the selected session's encoder here before parsing the pipeline.
+  for (const auto &technology : {"h264", "h265", "av1"}) {
+    pipeline = std::regex_replace(pipeline,
+                                  std::regex(fmt::format("va{}enc", technology)),
+                                  fmt::format("va{}{}enc", node_name, technology));
+  }
+  return pipeline;
+}
 
 struct GstBusData {
   std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready;
@@ -379,7 +396,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
   auto [color_range, color_space] = get_color_params(video_session);
 
   auto pipeline = fmt::format(
-      fmt::runtime(video_session->gst_pipeline),
+      fmt::runtime(bind_encoder_to_render_node(video_session->gst_pipeline, video_session->render_node)),
       fmt::arg("session_id", video_session->session_id),
       fmt::arg("width", video_session->display_mode.width),
       fmt::arg("height", video_session->display_mode.height),

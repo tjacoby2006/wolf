@@ -21,6 +21,7 @@
 #include <openssl/x509.h>
 #include <optional>
 #include <state/serialised_config.hpp>
+#include <state/gpu_scheduler.hpp>
 #include <utility>
 #include <vector>
 
@@ -195,6 +196,8 @@ struct AppState {
    * A list of all currently running (and paused) streaming sessions
    */
   SessionsAtoms running_sessions;
+
+  std::shared_ptr<GPUScheduler> gpu_scheduler;
 };
 
 const static immer::array<audio::AudioMode> AUDIO_CONFIGURATIONS = {

@@ -249,6 +249,14 @@ Config load_or_default(const std::string &source,
   // Will throw if the config is invalid
   auto cfg = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(source).value();
 
+  for (const auto &gpu : cfg.gpus) {
+    if (gpu.render_node.empty() || gpu.weight <= 0) {
+      throw std::runtime_error(fmt::format("Invalid GPU configuration: render_node='{}', weight={}",
+                                           gpu.render_node,
+                                           gpu.weight));
+    }
+  }
+
   auto default_gst_video_settings = cfg.gstreamer.video;
   auto default_gst_audio_settings = cfg.gstreamer.audio;
   if (default_gst_video_settings.default_source.find("name=interpipesrc") == std::string::npos) {
@@ -279,6 +287,19 @@ Config load_or_default(const std::string &source,
     throw std::runtime_error(
         "Unable to find a compatible H.264 encoder, please check [[gstreamer.video.h264_encoders]] "
         "in your config.toml or your Gstreamer installation");
+  }
+  for (const auto &gpu : cfg.gpus) {
+    const auto gpu_vendor = get_vendor(gpu.render_node);
+    if (gpu_vendor == GPU_VENDOR::UNKNOWN) {
+      throw std::runtime_error(fmt::format("Unable to identify configured GPU render node {}", gpu.render_node));
+    }
+    if (!get_encoder("h264", gpu.render_node, default_gst_video_settings.h264_encoders, gpu_vendor)) {
+      throw std::runtime_error(fmt::format("No compatible H.264 encoder found for configured GPU {}", gpu.render_node));
+    }
+    logs::log(logs::info,
+              "Validated configured GPU {} ({}) for session scheduling",
+              gpu.render_node,
+              get_vendor_name(gpu_vendor));
   }
   auto hevc_encoder = get_encoder("h265", default_gst_render_node, default_gst_video_settings.hevc_encoders, vendor);
   auto av1_encoder = get_encoder("av1", default_gst_render_node, default_gst_video_settings.av1_encoders, vendor);
