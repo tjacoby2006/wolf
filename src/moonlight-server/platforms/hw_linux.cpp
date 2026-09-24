@@ -195,20 +195,23 @@ bool same_gpu(std::string_view first, std::string_view second) {
   if (first == second) {
     return true;
   }
-  if (!std::filesystem::exists(first) || !std::filesystem::exists(second)) {
+  const auto first_name = get_render_node_name(first);
+  const auto second_name = get_render_node_name(second);
+  if (first_name.empty() || second_name.empty()) {
     return false;
   }
 
-  auto first_device = drm_open_device(first);
-  auto second_device = drm_open_device(second);
-  if (!first_device->deviceinfo.pci || !second_device->deviceinfo.pci) {
+  // libdrm exposes only PCI vendor/device IDs in drmPciDeviceInfo, which are
+  // not unique when multiple GPUs use the same model. The DRM sysfs device
+  // symlink identifies the physical PCI device, including its BDF address.
+  std::error_code ec;
+  const auto first_device = std::filesystem::canonical("/sys/class/drm/" + first_name + "/device", ec);
+  if (ec) {
     return false;
   }
-
-  const auto *first_pci = first_device->deviceinfo.pci;
-  const auto *second_pci = second_device->deviceinfo.pci;
-  return first_pci->domain == second_pci->domain && first_pci->bus == second_pci->bus &&
-         first_pci->dev == second_pci->dev && first_pci->func == second_pci->func;
+  ec.clear();
+  const auto second_device = std::filesystem::canonical("/sys/class/drm/" + second_name + "/device", ec);
+  return !ec && first_device == second_device;
 }
 
 std::string get_vendor_name(GPU_VENDOR vendor) {
