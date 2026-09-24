@@ -78,7 +78,6 @@ std::optional<int> getCudaDeviceIndexFromPciBusId(const std::string &pciBusId) {
     return value;
   };
 
-  std::vector<std::pair<std::string, std::string>> gpuBusIds;
   for (const auto &entry : fs::directory_iterator(gpusDir, ec)) {
     if (!entry.is_directory()) {
       continue;
@@ -87,41 +86,39 @@ std::optional<int> getCudaDeviceIndexFromPciBusId(const std::string &pciBusId) {
     std::string busId = entry.path().filename().string();
     logs::log(logs::debug, "Found Nvidia GPU: {}", busId);
 
-    gpuBusIds.emplace_back(busId, normalize(busId));
-  }
-
-  if (gpuBusIds.empty()) {
-    logs::log(logs::warning, "No NVIDIA GPUs found in {}", gpusDir.string());
-    return std::nullopt;
-  }
-
-  std::sort(gpuBusIds.begin(), gpuBusIds.end(), [](const auto &lhs, const auto &rhs) {
-    return lhs.second < rhs.second;
-  });
-
-  std::string target = normalize(pciBusId);
-  for (size_t index = 0; index < gpuBusIds.size(); ++index) {
-    if (gpuBusIds[index].second == target) {
-      logs::log(logs::debug,
-                "PCI bus ID {} mapped to CUDA device index {} (sorted order)",
-                gpuBusIds[index].first,
-                index);
-      return static_cast<int>(index);
+    if (normalize(busId) != normalize(pciBusId)) {
+      continue;
     }
-  }
 
-  std::string availableIds;
-  for (const auto &entry : gpuBusIds) {
-    if (!availableIds.empty()) {
-      availableIds.append(", ");
+    // CUDA ordinals are not guaranteed to follow PCI bus ordering. The
+    // NVIDIA kernel driver records the CUDA ordinal in Device Minor, and
+    // that remains correct when Docker exposes only a subset of GPUs.
+    std::ifstream info_file(entry.path() / "information");
+    if (!info_file.is_open()) {
+      continue;
     }
-    availableIds.append(entry.first);
+
+    std::string line;
+    while (std::getline(info_file, line)) {
+      constexpr std::string_view prefix = "Device Minor:";
+      if (line.rfind(prefix, 0) != 0) {
+        continue;
+      }
+      auto value = line.substr(prefix.size());
+      value.erase(0, value.find_first_not_of(" \t"));
+      try {
+        const auto device_index = std::stoi(value);
+        logs::log(logs::debug, "PCI bus ID {} mapped to CUDA device index {}", busId, device_index);
+        return device_index;
+      } catch (const std::exception &) {
+        return std::nullopt;
+      }
+    }
   }
 
   logs::log(logs::warning,
-            "PCI bus ID {} not found when mapping to CUDA device index. Available GPUs: {}",
-            pciBusId,
-            availableIds);
+            "PCI bus ID {} not found in NVIDIA GPU information under {}",
+            pciBusId, gpusDir.string());
 
   return std::nullopt;
 }
