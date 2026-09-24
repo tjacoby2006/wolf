@@ -83,6 +83,8 @@ struct Config {
   bool support_av1;
   /** GPUs configured for per-session scheduling. Empty means auto-discover. */
   std::vector<wolf::config::GPUConfig> gpus;
+  /** Render nodes excluded from session scheduling. */
+  std::vector<std::string> excluded_gpus;
 
   /**
    * Mutable, paired_clients will be loaded up on startup
