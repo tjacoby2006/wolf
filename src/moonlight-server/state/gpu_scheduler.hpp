@@ -22,7 +22,8 @@ struct GPUAssignment {
 /** Thread-safe weighted least-loaded scheduler for per-session GPU assignments. */
 class GPUScheduler {
 public:
-  explicit GPUScheduler(std::vector<wolf::config::GPUConfig> configured = {});
+  explicit GPUScheduler(std::vector<wolf::config::GPUConfig> configured = {},
+                        std::vector<std::string> excluded = {});
 
   std::optional<GPUAssignment> acquire();
   void release(const GPUAssignment &assignment);

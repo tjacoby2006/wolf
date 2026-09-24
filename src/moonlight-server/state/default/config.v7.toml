@@ -7,6 +7,8 @@ paired_clients = []
 
 # Optional GPU scheduling. Leave empty to automatically use every /dev/dri/renderD* node
 # with equal weight. Each new Moonlight session is assigned independently.
+# excluded_gpus = ["/dev/dri/renderD128"]
+# When [[gpus]] entries are provided, only those render nodes are used.
 # [[gpus]]
 # render_node = "/dev/dri/renderD128"
 # weight = 10

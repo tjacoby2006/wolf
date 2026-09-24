@@ -152,6 +152,8 @@ struct WolfConfig {
   GstreamerSettings gstreamer;
   /* Empty means discover the available DRM render nodes automatically. */
   std::vector<GPUConfig> gpus;
+  /* Render nodes to omit from automatic discovery or the configured GPU list. */
+  std::vector<std::string> excluded_gpus;
 };
 
 struct BaseConfig {

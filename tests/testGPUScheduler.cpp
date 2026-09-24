@@ -44,3 +44,40 @@ TEST_CASE("GPU scheduler rejects invalid entries and duplicate nodes") {
   scheduler.release(*assignment);
   scheduler.release(*second);
 }
+
+TEST_CASE("GPU scheduler prefers weight over render node order when idle") {
+  state::GPUScheduler scheduler({
+      {.render_node = "/dev/dri/renderD128", .weight = 7},
+      {.render_node = "/dev/dri/renderD129", .weight = 10},
+  });
+  auto first = scheduler.acquire();
+  REQUIRE(first);
+  REQUIRE(first->render_node == "/dev/dri/renderD129");
+  auto second = scheduler.acquire();
+  REQUIRE(second);
+  REQUIRE(second->render_node == "/dev/dri/renderD128");
+  scheduler.release(*first);
+  scheduler.release(*second);
+}
+
+TEST_CASE("GPU scheduler excludes configured nodes and only uses explicitly weighted nodes") {
+  state::GPUScheduler scheduler({
+                                    {.render_node = "/dev/dri/renderD128", .weight = 10},
+                                    {.render_node = "/dev/dri/renderD129", .weight = 7},
+                                },
+                                {"/dev/dri/renderD128"});
+  for (int i = 0; i < 3; ++i) {
+    auto assignment = scheduler.acquire();
+    REQUIRE(assignment);
+    REQUIRE(assignment->render_node == "/dev/dri/renderD129");
+    scheduler.release(*assignment);
+  }
+  REQUIRE(scheduler.loads().size() == 1);
+}
+
+TEST_CASE("GPU scheduler never falls back to discovery when all configured GPUs are excluded") {
+  state::GPUScheduler scheduler({{.render_node = "/dev/dri/renderD128", .weight = 10}},
+                                {"/dev/dri/renderD128"});
+  REQUIRE_FALSE(scheduler.acquire());
+  REQUIRE(scheduler.loads().empty());
+}

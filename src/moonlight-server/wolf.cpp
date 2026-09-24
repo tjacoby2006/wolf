@@ -117,7 +117,7 @@ auto initialize(std::string_view config_file, std::string_view pkey_filename, st
       .event_bus = event_bus,
       .lobbies = std::make_shared<immer::atom<immer::vector<events::Lobby>>>(),
       .running_sessions = running_sessions,
-      .gpu_scheduler = std::make_shared<state::GPUScheduler>(config.gpus)};
+      .gpu_scheduler = std::make_shared<state::GPUScheduler>(config.gpus, config.excluded_gpus)};
   return immer::box<state::AppState>(state);
 }
 

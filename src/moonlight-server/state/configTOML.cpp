@@ -294,6 +294,9 @@ Config load_or_default(const std::string &source,
         "in your config.toml or your Gstreamer installation");
   }
   for (const auto &gpu : cfg.gpus) {
+    if (std::find(cfg.excluded_gpus.begin(), cfg.excluded_gpus.end(), gpu.render_node) != cfg.excluded_gpus.end()) {
+      continue;
+    }
     const auto gpu_vendor = get_vendor(gpu.render_node);
     if (gpu_vendor == GPU_VENDOR::UNKNOWN) {
       throw std::runtime_error(fmt::format("Unable to identify configured GPU render node {}", gpu.render_node));

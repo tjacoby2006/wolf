@@ -28,7 +28,7 @@ std::vector<wolf::config::GPUConfig> discover_gpus() {
 }
 } // namespace
 
-GPUScheduler::GPUScheduler(std::vector<wolf::config::GPUConfig> configured) {
+GPUScheduler::GPUScheduler(std::vector<wolf::config::GPUConfig> configured, std::vector<std::string> excluded) {
   if (configured.empty()) {
     configured = discover_gpus();
   }
@@ -36,6 +36,9 @@ GPUScheduler::GPUScheduler(std::vector<wolf::config::GPUConfig> configured) {
     return lhs.render_node < rhs.render_node;
   });
   for (const auto &gpu : configured) {
+    if (std::find(excluded.begin(), excluded.end(), gpu.render_node) != excluded.end()) {
+      continue;
+    }
     if (gpu.render_node.empty() || gpu.weight <= 0) {
       logs::log(logs::warning, "Ignoring invalid GPU configuration: node='{}', weight={}", gpu.render_node, gpu.weight);
       continue;
@@ -54,9 +57,10 @@ std::optional<GPUAssignment> GPUScheduler::acquire() {
     return std::nullopt;
   }
   auto best = std::min_element(gpus_.begin(), gpus_.end(), [](const auto &lhs, const auto &rhs) {
+    // Compare the load after assignment so a higher weight wins when both GPUs are idle.
     // Cross multiplication avoids floating-point tie instability.
-    const auto lhs_score = lhs.active * static_cast<std::size_t>(rhs.weight);
-    const auto rhs_score = rhs.active * static_cast<std::size_t>(lhs.weight);
+    const auto lhs_score = (lhs.active + 1) * static_cast<std::size_t>(rhs.weight);
+    const auto rhs_score = (rhs.active + 1) * static_cast<std::size_t>(lhs.weight);
     if (lhs_score != rhs_score) {
       return lhs_score < rhs_score;
     }
