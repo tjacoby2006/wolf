@@ -275,6 +275,11 @@ Config load_or_default(const std::string &source,
 
   auto default_app_render_node = utils::get_env("WOLF_RENDER_NODE", "/dev/dri/renderD128");
   auto default_gst_render_node = utils::get_env("WOLF_ENCODER_NODE", default_app_render_node);
+  if (!same_gpu(default_app_render_node, default_gst_render_node)) {
+    throw std::runtime_error(fmt::format("WOLF_RENDER_NODE ({}) and WOLF_ENCODER_NODE ({}) must refer to the same GPU",
+                                         default_app_render_node,
+                                         default_gst_render_node));
+  }
   auto vendor = get_vendor(default_gst_render_node);
   if (vendor == GPU_VENDOR::UNKNOWN) {
     logs::log(logs::warning, "Unable to detect GPU vendor, disabling zero copy pipeline.");

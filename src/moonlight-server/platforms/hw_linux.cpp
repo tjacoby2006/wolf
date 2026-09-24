@@ -191,6 +191,26 @@ GPU_VENDOR get_vendor(std::string_view gpu) {
   return UNKNOWN;
 }
 
+bool same_gpu(std::string_view first, std::string_view second) {
+  if (first == second) {
+    return true;
+  }
+  if (!std::filesystem::exists(first) || !std::filesystem::exists(second)) {
+    return false;
+  }
+
+  auto first_device = drm_open_device(first);
+  auto second_device = drm_open_device(second);
+  if (!first_device->deviceinfo.pci || !second_device->deviceinfo.pci) {
+    return false;
+  }
+
+  const auto *first_pci = first_device->deviceinfo.pci;
+  const auto *second_pci = second_device->deviceinfo.pci;
+  return first_pci->domain == second_pci->domain && first_pci->bus == second_pci->bus &&
+         first_pci->dev == second_pci->dev && first_pci->func == second_pci->func;
+}
+
 std::string get_vendor_name(GPU_VENDOR vendor) {
   switch (vendor) {
   case NVIDIA:
