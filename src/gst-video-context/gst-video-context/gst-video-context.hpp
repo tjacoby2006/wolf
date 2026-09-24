@@ -39,5 +39,6 @@ private:
 gst_context_ptr need_context_for_device(const std::string &device_path, GstMessage *msg);
 
 bool set_context(gst_context_ptr context, GstMessage *msg);
+bool set_context(gst_context_ptr context, GstElement *element);
 
 } // namespace gst_video_context

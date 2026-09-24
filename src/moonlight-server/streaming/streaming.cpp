@@ -36,8 +36,10 @@ static std::string bind_encoder_to_render_node(std::string pipeline, std::string
 }
 
 static void bind_cuda_encoder_to_render_node(GstElement *pipeline, const std::string &render_node) {
+  auto context_provider = gst_video_context::GstVideoContextProvider{};
+  auto cuda_context = context_provider.get_or_create(render_node);
   const auto cuda_device = gst_video_context::getCudaDeviceFromDri(render_node);
-  if (!cuda_device) {
+  if (!cuda_device && !cuda_context) {
     return;
   }
 
@@ -47,6 +49,9 @@ static void bind_cuda_encoder_to_render_node(GstElement *pipeline, const std::st
     auto *element = GST_ELEMENT(g_value_get_object(&item));
     auto *factory = gst_element_get_factory(element);
     const auto *factory_name = factory ? gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)) : nullptr;
+    if (cuda_context && factory_name && g_str_has_prefix(factory_name, "nv")) {
+      gst_video_context::set_context(cuda_context, element);
+    }
     if (factory_name && g_str_has_prefix(factory_name, "nvh") &&
         g_object_class_find_property(G_OBJECT_GET_CLASS(element), "cuda-device-id")) {
       g_object_set(element, "cuda-device-id", *cuda_device, nullptr);
