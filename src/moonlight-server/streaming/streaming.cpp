@@ -32,34 +32,18 @@ static std::string bind_encoder_to_render_node(std::string pipeline, std::string
                                   std::regex(fmt::format("va{}enc", technology)),
                                   fmt::format("va{}{}enc", node_name, technology));
   }
-  return pipeline;
-}
-
-static void bind_cuda_encoder_to_render_node(
-    GstElement *pipeline,
-    const std::string &render_node,
-    const std::shared_ptr<gst_video_context::GstVideoContextProvider> &context_provider) {
-  auto cuda_context = context_provider->get_or_create(render_node);
-  if (!cuda_context) {
-    return;
-  }
-  logs::log(logs::debug, "[GSTREAMER] Binding all video-pipeline elements to CUDA context for {}", render_node);
-
-  auto iterator = gst_bin_iterate_recurse(GST_BIN(pipeline));
-  GValue item = G_VALUE_INIT;
-  while (gst_iterator_next(iterator, &item) == GST_ITERATOR_OK) {
-    auto *element = GST_ELEMENT(g_value_get_object(&item));
-    // cudaupload and cudaconvertscale choose their device from the same
-    // context as NVENC. Restricting this to nvh* left those upstream CUDA
-    // elements free to create a device-0 context, which NVENC then adopted.
-    // Context messages are harmless for non-CUDA elements.
-    if (cuda_context) {
-      gst_video_context::set_context(cuda_context, element);
+  // GstNvEnc exposes cuda-device-id as construct-only. It cannot be changed
+  // after gst_parse_launch(), so place the physical GPU's CUDA ordinal in the
+  // launch description before the encoder element is constructed.
+  if (pipeline.find("cuda-device-id") == std::string::npos) {
+    if (const auto cuda_device = gst_video_context::getCudaDeviceFromDri(std::string(render_node))) {
+      pipeline = std::regex_replace(pipeline,
+                                    std::regex(R"(\b(nvh(?:264|265|av1)enc)\b)"),
+                                    fmt::format("$1 cuda-device-id={}", *cuda_device),
+                                    std::regex_constants::format_first_only);
     }
-    g_value_reset(&item);
   }
-  g_value_unset(&item);
-  gst_iterator_free(iterator);
+  return pipeline;
 }
 
 struct GstBusData {
@@ -451,11 +435,6 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
   std::shared_ptr<NeedContextData> ctx_data_ptr = std::make_shared<NeedContextData>(
       NeedContextData{.device_path = video_session->render_node, .context_provider = context_provider});
   run_pipeline(pipeline, [video_session, event_bus, udp_sink, ctx_data_ptr](auto pipeline) {
-    // Set the selected CUDA context before PLAYING. This must include the CUDA
-    // upload and conversion elements, not just NVENC, because the encoder
-    // adopts the device context negotiated by its upstream CUDA memory.
-    bind_cuda_encoder_to_render_node(pipeline.get(), video_session->render_node, ctx_data_ptr->context_provider);
-
     if (auto app_sink_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_udp_sink")) {
       logs::log(logs::debug, "Setting up wolf_udp_sink");
       g_assert(GST_IS_APP_SINK(app_sink_el));

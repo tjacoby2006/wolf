@@ -153,14 +153,6 @@ bool set_context(gst_context_ptr context, GstMessage *msg) {
   return false;
 }
 
-bool set_context(gst_context_ptr context, GstElement *element) {
-  if (!context || !element) {
-    return false;
-  }
-  gst_element_set_context(element, context->context);
-  return true;
-}
-
 cuda_context_ptr create_cuda_context(const std::string &device_path) {
   auto device_id = getCudaDeviceFromDri(device_path).value_or(0);
   logs::log(logs::info, "Creating CUDA context for device {} (detected CUDA device ID: {})", device_path, device_id);
