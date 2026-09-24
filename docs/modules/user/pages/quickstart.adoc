@@ -586,7 +586,11 @@ Y
 .Multiple GPUs / finding the device ID for WOLF_RENDER_NODE
 [%collapsible]
 ====
-If you have a multi GPU setup, you need to set the `WOLF_RENDER_NODE` environmnet variable to the correct card. You can find a list of attached graphics cards with:
+If you have a multi GPU setup, you need to tell Wolf which cards it may use. You can either set the
+`WOLF_RENDER_NODE` environment variable to a single card (the default, used as a fallback), or list
+all the cards in the `[[gpus]]` array of `config.toml` so that Wolf load balances sessions across
+them (see xref:user:configuration.adoc#_multiple_gpu[]). You can find a list of attached graphics
+cards with:
 
 [source,bash]
 ....

@@ -57,7 +57,7 @@ Wolf is configured via a TOML config file and some additional optional ENV varia
 
 |WOLF_RENDER_NODE
 |/dev/dri/renderD128
-|The default render node used for virtual desktops; see: <<_multiple_gpu>>
+|Fallback render node used when no GPU can be configured/detected; see: <<_multiple_gpu>>
 
 |WOLF_DOCKER_FAKE_UDEV_PATH
 |$HOST_APPS_STATE_FOLDER/fake-udev
@@ -113,12 +113,16 @@ The TOML configuration file is read only once at startup (or created if not pres
 ....
 hostname = "wolf"   #<1>
 support_hevc = true #<2>
-config_version = 2 #<3>
+config_version = 8  #<3>
 uuid = "0f75f4d1-e28e-410a-b318-c0579f18f8d1" #<4>
 
 paired_clients = [] #<5>
 profiles = [] #<6>
-gstreamer = {} #<7>
+
+gpus = []           #<7>
+excluded_gpus = []  #<8>
+
+gstreamer = {} #<9>
 ....
 
 <1> *hostname*: this is the name that will be displayed in the list of hosts in the Moonlight UI
@@ -127,7 +131,9 @@ gstreamer = {} #<7>
 <4> *uuid*: a randomly generated UUID, it's used by Moonlight to know if the current host has already been paired
 <5> *paired_clients*: a list of all the Moonlight clients that have succesfully completed the pairing process; it'll be populated by Wolf and saved to this file.
 <6> *profiles*: a list of xref:_profiles[profiles], each contains a list of xref:_defining_apps[apps]
-<7> *gstreamer* audio/video pipeline definitions, see xref:_gstreamer[]
+<7> *gpus*: the list of GPUs Wolf may use, each with a `render_node` and a relative `weight`; if empty Wolf auto-detects all GPUs, see xref:_multiple_gpu[]
+<8> *excluded_gpus*: render nodes to ignore when auto-detecting GPUs
+<9> *gstreamer* audio/video pipeline definitions, see xref:_gstreamer[]
 
 [#_profiles]
 === Profiles
@@ -479,8 +485,36 @@ If both are defined, Gamescoped is used. (see https://github.com/games-on-whales
 [#_multiple_gpu]
 == Multiple GPUs
 
-When you have multiple GPUs installed in your host, you might want to specify which one to use for Wolf.
-Use the `WOLF_RENDER_NODE` environment variable (defaults to `/dev/dri/renderD128`) to control this.
+Wolf can use every GPU installed in the host, balancing sessions across them while keeping the
+rendering (virtual Wayland desktop) and the encoding (GStreamer) on the **same** GPU.
+
+The pool of GPUs is configured with a top-level `[[gpus]]` array; each entry has a `render_node` and a
+relative `weight`:
+
+[source,toml]
+....
+[[gpus]]
+render_node = "/dev/dri/renderD128"
+weight = 3
+
+[[gpus]]
+render_node = "/dev/dri/renderD129"
+weight = 1
+....
+
+When a new session starts Wolf assigns it to the GPU with the highest `(weight - assigned_sessions)`
+score, breaking ties with the fewest assigned sessions and finally with the config order. With the
+example above, three sessions will land on `renderD128` for every one that lands on `renderD129`.
+
+If the `gpus` array is left empty Wolf will automatically detect **all** the render nodes available on
+the host and give each of them a weight of `1`. Use `excluded_gpus` to skip specific devices when
+auto-detecting:
+
+[source,toml]
+....
+# Render nodes to ignore when auto-detecting GPUs (has no effect when `gpus` is set)
+excluded_gpus = ["/dev/dri/renderD128"]
+....
 
 [TIP]
 ====
@@ -501,11 +535,15 @@ ls -l /sys/class/drm/renderD*/device/driver
 
 There are two main separated parts that make use of HW acceleration in Wolf:
 
-* *App render node*: this will use HW acceleration in order to create virtual Wayland desktops and run the chosen app (ex: Firefox, Steam, ...).
+* *Rendering*: this will use HW acceleration in order to create virtual Wayland desktops and run the chosen app (ex: Firefox, Steam, ...).
 * *Gstreamer video encoding*: this will use HW acceleration in order to efficiently encode the video stream with H.264 or HEVC.
 
-Since Wolf supports HW accelerated zero-copy pipelines it's best to keep both the Wayland rendering and the Gstreamer encoding on the same GPU.
-Support for multi-GPU load balancing is planned for future releases.
+Since Wolf supports HW accelerated zero-copy pipelines both parts are pinned to the same GPU for each
+session.
+
+NOTE: The `WOLF_RENDER_NODE` and `WOLF_ENCODER_NODE` environment variables are still honoured as a
+fallback when no GPU can be detected or configured, so single-GPU deployments keep working unchanged.
+Per-app `render_node` pins are no longer supported; use the `gpus` list and weights instead.
 
 [#_keyboard_layout]
 == Changing and Switching Keyboard Layouts in wolf Apps Containers

@@ -46,7 +46,7 @@ TEST_CASE("LocalState load TOML", "[LocalState]") {
     REQUIRE_THAT(first_app->av1_gst_pipeline,
                  Equals(fmt::format("{} !\nparams !\nav1_pipeline !\nvideo_sink", default_video_source)));
     REQUIRE(first_app->start_virtual_compositor);
-    REQUIRE(first_app->render_node == "/dev/dri/renderD128");
+    REQUIRE(first_app->render_node == state.gpus.gpus.front().render_node);
     auto first_app_runner = rfl::get<AppDocker>(first_app->runner->serialize().variant());
     REQUIRE_THAT(first_app_runner.image, Equals("ghcr.io/games-on-whales/firefox:master"));
 
@@ -61,7 +61,6 @@ TEST_CASE("LocalState load TOML", "[LocalState]") {
     REQUIRE_THAT(second_app->av1_gst_pipeline,
                  Equals("override DEFAULT SOURCE !\nparams !\nav1_pipeline !\nvideo_sink"));
     REQUIRE(!second_app->start_virtual_compositor);
-    REQUIRE(second_app->render_node == "/tmp/dead_beef");
     auto second_app_runner = rfl::get<AppCMD>(second_app->runner->serialize().variant());
     REQUIRE_THAT(second_app_runner.run_cmd, Equals("destroy_computer_now"));
   }

@@ -236,6 +236,7 @@ void UnixSocketServer::endpoint_StreamSessionAdd(const HTTPRequest &req, std::sh
       choosen_app = events::App{
           .base = {.title = "dummy", .id = state::gen_uuid(), .support_hdr = false, .icon_png_path = ""},
 
+          .video_override = sample_app->video_override,
           .video_producer_buffer_caps = sample_app->video_producer_buffer_caps,
 
           .h264_gst_pipeline = sample_app->h264_gst_pipeline,
@@ -243,6 +244,8 @@ void UnixSocketServer::endpoint_StreamSessionAdd(const HTTPRequest &req, std::sh
           .av1_gst_pipeline = sample_app->av1_gst_pipeline,
 
           .render_node = sample_app->render_node,
+          .support_hevc = sample_app->support_hevc,
+          .support_av1 = sample_app->support_av1,
           .opus_gst_pipeline = sample_app->opus_gst_pipeline,
           .start_virtual_compositor = true,
           .start_audio_server = true,
@@ -305,7 +308,7 @@ void UnixSocketServer::endpoint_StreamSessionStart(const HTTPRequest &req, std::
       auto video_session = start_req.value().video_session;
       video_session.session_id = session_id; // Can't be JSON encoded
       if (video_session.render_node.empty()) {
-        video_session.render_node = session->app->render_node;
+        video_session.render_node = session->render_node;
       }
       state_->app_state->event_bus->fire_event(immer::box<events::VideoSession>(video_session));
 

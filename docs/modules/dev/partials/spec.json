@@ -915,6 +915,16 @@
               }
             ]
           },
+          "video_override": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/wolf__config__BaseAppVideoOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "h264_gst_pipeline": {
             "type": "string"
           },
@@ -926,6 +936,12 @@
           },
           "render_node": {
             "type": "string"
+          },
+          "support_hevc": {
+            "type": "boolean"
+          },
+          "support_av1": {
+            "type": "boolean"
           },
           "opus_gst_pipeline": {
             "type": "string"
@@ -955,6 +971,8 @@
           "hevc_gst_pipeline",
           "av1_gst_pipeline",
           "render_node",
+          "support_hevc",
+          "support_av1",
           "opus_gst_pipeline",
           "start_virtual_compositor",
           "start_audio_server",
@@ -1794,6 +1812,92 @@
           "v_scroll_acceleration",
           "h_scroll_acceleration"
         ]
+      },
+      "wolf__config__BaseAppVideoOverride": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sink": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "producer_buffer_caps": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "video_params": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "video_params_zero_copy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "h264_encoder": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hevc_encoder": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "av1_encoder": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": []
       },
       "wolf__core__audio__AudioMode": {
         "type": "object",

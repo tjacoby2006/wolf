@@ -58,7 +58,12 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
   auto plugged_devices_queue = std::make_shared<immer::atom<session_devices>>();
 
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StopStreamEvent>>(
-      [&app_state, plugged_devices_queue](const immer::box<events::StopStreamEvent> &ev) {
+      [app_state, plugged_devices_queue](const immer::box<events::StopStreamEvent> &ev) {
+        // Release the GPU that was pinned to this session
+        if (auto session = state::get_session_by_id(app_state->running_sessions->load(), ev->session_id)) {
+          state::release_session_gpu(app_state, session->render_node);
+        }
+
         // Remove session from app state so that HTTP/S applist gets updated
         // This should effectively destroy the virtual Wayland session since it holds the last reference
         app_state->running_sessions->update([&ev](const immer::vector<events::StreamSession> &ses_v) {
@@ -103,7 +108,7 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           std::thread([session, on_ready, gst_context = app_state->gst_context]() {
             streaming::start_video_producer(std::to_string(session->session_id),
                                             session->app->video_producer_buffer_caps,
-                                            session->app->render_node,
+                                            session->render_node,
                                             {.width = session->display_mode.width,
                                              .height = session->display_mode.height,
                                              .refreshRate = session->display_mode.refreshRate},
@@ -211,8 +216,8 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                           .width = run_session->stream_session->display_mode.width,
                           .height = run_session->stream_session->display_mode.height,
                           .refresh_rate = run_session->stream_session->display_mode.refreshRate,
-                          .wayland_render_node = run_session->stream_session->app->render_node,
-                          .runner_render_node = run_session->stream_session->app->render_node,
+                          .wayland_render_node = run_session->stream_session->render_node,
+                          .runner_render_node = run_session->stream_session->render_node,
                           .video_producer_buffer_caps = run_session->stream_session->app->video_producer_buffer_caps,
                       },
                   .wayland_display = run_session->stream_session->wayland_display->load(),

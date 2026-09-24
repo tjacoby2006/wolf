@@ -19,6 +19,7 @@ set(SRC_LIST
         testControl.cpp
         testCrypto.cpp
         testGSTPlugin.cpp
+        testGpuBalancer.cpp
         testMoonlight.cpp
         testRTSP.cpp
         testWolfAPI.cpp

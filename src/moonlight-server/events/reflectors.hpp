@@ -48,11 +48,15 @@ template <> struct Reflector<events::App> {
     const bool support_hdr;
     std::optional<std::string> icon_png_path;
 
+    std::optional<wolf::config::BaseAppVideoOverride> video_override;
+
     std::string h264_gst_pipeline;
     std::string hevc_gst_pipeline;
     std::string av1_gst_pipeline;
 
     std::string render_node;
+    bool support_hevc = false;
+    bool support_av1 = false;
 
     std::string opus_gst_pipeline;
     bool start_virtual_compositor;
@@ -65,10 +69,13 @@ template <> struct Reflector<events::App> {
             .id = v.base.id,
             .support_hdr = v.base.support_hdr,
             .icon_png_path = v.base.icon_png_path,
+            .video_override = v.video_override,
             .h264_gst_pipeline = v.h264_gst_pipeline,
             .hevc_gst_pipeline = v.hevc_gst_pipeline,
             .av1_gst_pipeline = v.av1_gst_pipeline,
             .render_node = v.render_node,
+            .support_hevc = v.support_hevc,
+            .support_av1 = v.support_av1,
             .opus_gst_pipeline = v.opus_gst_pipeline,
             .start_virtual_compositor = v.start_virtual_compositor,
             .start_audio_server = v.start_audio_server,
@@ -79,10 +86,15 @@ template <> struct Reflector<events::App> {
     auto runner = Reflector<events::Runner>::to(app.runner, ev_bus);
     return events::App{
         .base = {.title = app.title, .id = app.id, .support_hdr = app.support_hdr, .icon_png_path = app.icon_png_path},
+        .video_override = app.video_override.value_or(wolf::config::BaseAppVideoOverride{}),
+        .video_producer_buffer_caps = app.video_override.value_or(wolf::config::BaseAppVideoOverride{})
+                                          .producer_buffer_caps.value_or(""),
         .h264_gst_pipeline = app.h264_gst_pipeline,
         .hevc_gst_pipeline = app.hevc_gst_pipeline,
         .av1_gst_pipeline = app.av1_gst_pipeline,
         .render_node = app.render_node,
+        .support_hevc = app.support_hevc,
+        .support_av1 = app.support_av1,
         .opus_gst_pipeline = app.opus_gst_pipeline,
         .start_virtual_compositor = app.start_virtual_compositor,
         .start_audio_server = app.start_audio_server,

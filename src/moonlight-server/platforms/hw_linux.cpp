@@ -1,4 +1,5 @@
 #include "hw.hpp"
+#include <algorithm>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <filesystem>
@@ -213,6 +214,28 @@ std::string get_render_node_name(std::string_view render_node) {
   std::string path_copy(resolved_path);
   char *base = basename(&path_copy[0]); // Get mutable data from string
   return std::string(base);
+}
+
+std::vector<std::string> list_render_nodes() {
+  std::vector<std::string> render_nodes;
+  const std::filesystem::path dri_path("/dev/dri");
+  std::error_code err;
+  if (!std::filesystem::exists(dri_path, err) || !std::filesystem::is_directory(dri_path, err)) {
+    logs::log(logs::debug, "{} doesn't exist, no render nodes found", dri_path.string());
+    return render_nodes;
+  }
+
+  for (const auto &entry : std::filesystem::directory_iterator(dri_path, err)) {
+    auto filename = entry.path().filename().string();
+    if (filename.rfind("renderD", 0) == 0) {
+      render_nodes.emplace_back(entry.path().string());
+    }
+  }
+
+  // Sort so that renderD128 comes before renderD129 etc., regardless of directory iteration order
+  std::sort(render_nodes.begin(), render_nodes.end());
+  logs::log(logs::debug, "Found {} render nodes", render_nodes.size());
+  return render_nodes;
 }
 
 std::string get_ip_address(ifaddrs *ifa) {

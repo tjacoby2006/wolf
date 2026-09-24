@@ -51,16 +51,25 @@ static void application_message_handler(GstBus *bus, GstMessage *msg, gpointer d
 
 struct NeedContextData {
   const std::string device_path;
-  std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> gst_context;
+  state::GstContextMapAtom gst_context;
 };
 
 static void need_context_handler(GstBus *bus, GstMessage *msg, gpointer data) {
   auto ctx_data = static_cast<NeedContextData *>(data);
-  if (auto gst_context = ctx_data->gst_context->load().get()) {
-    logs::log(logs::debug, "Context already set, passing it to the pipeline.");
-    gst_video_context::set_context(gst_context, msg);
-  } else if (auto video_context = gst_video_context::need_context_for_device(ctx_data->device_path, msg)) {
-    ctx_data->gst_context->store(video_context);
+
+  // Reuse the context already created for this GPU (if any)
+  auto current = ctx_data->gst_context->load();
+  if (auto *existing = current.find(ctx_data->device_path)) {
+    logs::log(logs::debug, "Context already set for {}, passing it to the pipeline.", ctx_data->device_path);
+    gst_video_context::set_context(*existing, msg);
+    return;
+  }
+
+  // First time we see this GPU: create the context (this also sets it on the element) and cache it
+  if (auto created = gst_video_context::need_context_for_device(ctx_data->device_path, msg)) {
+    auto device_path = ctx_data->device_path;
+    ctx_data->gst_context->update(
+        [&device_path, created](const state::GstContextMap &map) { return map.set(device_path, created); });
   }
 }
 
@@ -92,7 +101,7 @@ void start_video_producer(const std::string &session_id,
                           const std::string &buffer_format,
                           const std::string &render_node,
                           const wolf::core::virtual_display::DisplayMode &display_mode,
-                          std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
+                          state::GstContextMapAtom video_context,
                           std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready,
                           std::shared_ptr<events::EventBusType> event_bus) {
   auto pipeline = fmt::format("waylanddisplaysrc name=wolf_wayland_source render_node={render_node} ! "
@@ -374,7 +383,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
                            const std::shared_ptr<events::EventBusType> &event_bus,
                            std::string client_ip,
                            unsigned short client_port,
-                           std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
+                           state::GstContextMapAtom video_context,
                            std::shared_ptr<udp::socket> video_socket) {
   auto [color_range, color_space] = get_color_params(video_session);
 

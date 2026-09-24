@@ -119,7 +119,6 @@ struct BaseAppAudioOverride {
 struct BaseApp {
   std::string title;
   std::optional<std::string> icon_png_path;
-  std::optional<std::string> render_node;
   std::optional<BaseAppVideoOverride> video;
   std::optional<BaseAppAudioOverride> audio;
   std::optional<bool> start_virtual_compositor;
@@ -137,12 +136,33 @@ struct Profile {
   std::vector<BaseApp> apps;
 };
 
+/**
+ * A GPU that Wolf can use, together with its session weight.
+ *
+ * When the `gpus` list is empty Wolf will automatically detect all the available GPUs and give
+ * each of them a weight of 1.
+ */
+struct GpuConfig {
+  std::string render_node;
+  int weight = 1;
+};
+
 struct WolfConfig {
   std::string hostname;
   std::string uuid;
-  int config_version = 7;
+  int config_version = 8;
   std::vector<PairedClient> paired_clients;
   std::vector<Profile> profiles;
+
+  /**
+   * Explicit list of GPUs to use. If empty, Wolf auto-detects all GPUs (minus `excluded_gpus`).
+   */
+  std::vector<GpuConfig> gpus;
+  /**
+   * Render nodes to ignore when auto-detecting GPUs.
+   */
+  std::vector<std::string> excluded_gpus;
+
   GstreamerSettings gstreamer;
 };
 

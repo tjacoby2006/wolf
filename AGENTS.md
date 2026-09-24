@@ -145,7 +145,8 @@ See `docs/modules/dev/pages/how-it-works.adoc` for the full picture.
 
 Behavior is driven by `WOLF_*` env vars read via `utils::get_env` (full working set in `wolf.cpp` and
 `.devcontainer/devcontainer.json`): `WOLF_CFG_FILE`, `WOLF_PRIVATE_KEY_FILE`/`WOLF_PRIVATE_CERT_FILE`,
-`WOLF_LOG_LEVEL`, `WOLF_DOCKER_SOCKET`, `WOLF_RENDER_NODE`/`WOLF_ENCODER_NODE` (GPU DRI nodes),
-`WOLF_PULSE_IMAGE`, `WOLF_INTERNAL_IP`/`WOLF_INTERNAL_MAC`, `WOLF_USE_ZERO_COPY`,
+`WOLF_LOG_LEVEL`, `WOLF_DOCKER_SOCKET`, `WOLF_RENDER_NODE`/`WOLF_ENCODER_NODE` (GPU DRI nodes; now
+only a fallback — GPU selection is normally driven by the `[[gpus]]` balancer), `WOLF_PULSE_IMAGE`,
+`WOLF_INTERNAL_IP`/`WOLF_INTERNAL_MAC`, `WOLF_USE_ZERO_COPY`,
 `WOLF_STOP_CONTAINER_ON_EXIT`. A few (e.g. `WOLF_EMBED_PULSE`, `PULSE_SERVER`) are set/consumed by
 `docker/startup.sh` + `supervisord.conf`, not by Wolf itself.

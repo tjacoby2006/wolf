@@ -63,6 +63,12 @@ struct Runner {
 struct App {
   moonlight::App base;
 
+  /**
+   * The raw per-app video overrides (source/sink/encoders/...), kept around so that the pipelines
+   * can be re-resolved against whichever GPU a session gets assigned to.
+   */
+  wolf::config::BaseAppVideoOverride video_override;
+
   std::string video_producer_buffer_caps;
 
   std::string h264_gst_pipeline;
@@ -70,6 +76,9 @@ struct App {
   std::string av1_gst_pipeline;
 
   std::string render_node;
+
+  bool support_hevc = false;
+  bool support_av1 = false;
 
   std::string opus_gst_pipeline;
   bool start_virtual_compositor;
@@ -102,6 +111,11 @@ struct Lobby {
   const std::string started_by_profile_id;
   std::optional<std::string> icon_png_path;
   const bool multi_user;
+
+  /**
+   * The GPU (render node) that this lobby was pinned to by the load balancer.
+   */
+  std::string render_node;
   /**
    * The pin that is required to join and control the lobby
    * If this is not set, then the lobby is open to everyone
@@ -413,6 +427,12 @@ struct StreamSession {
   std::shared_ptr<App> app;
   std::string app_local_state_folder;
   std::string app_host_state_folder;
+
+  /**
+   * The GPU (render node) that this session was pinned to by the load balancer.
+   * Rendering and encoding both happen on this device.
+   */
+  std::string render_node;
 
   // gcm encryption keys
   std::string aes_key;

@@ -448,8 +448,22 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
   auto client_ip = get_client_ip<SimpleWeb::HTTPS>(request);
   auto old_session = state::get_session_by_client(state->running_sessions->load(), current_client);
   if (old_session) {
+    auto old_render_node = old_session->render_node;
     auto new_session =
         create_run_session(request->parse_query_string(), client_ip, current_client, state, *old_session->app);
+
+    // create_stream_session ran the load balancer and may have picked a different GPU: undo that
+    // assignment and keep the resumed session on the same GPU as the original one.
+    state::release_session_gpu(state, new_session->render_node);
+    if (new_session->render_node != old_render_node) {
+      new_session->render_node = old_render_node;
+      new_session->app = std::make_shared<events::App>(*old_session->app);
+      new_session->display_mode.hevc_supported =
+          new_session->display_mode.hevc_supported && new_session->app->support_hevc;
+      new_session->display_mode.av1_supported =
+          new_session->display_mode.av1_supported && new_session->app->support_av1;
+    }
+
     // Carry over the old session display handle
     new_session->wayland_display = std::move(old_session->wayland_display);
     // Carry over the old session devices, they'll be already plugged into the container

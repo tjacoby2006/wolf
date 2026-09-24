@@ -20,6 +20,7 @@
 #include <moonlight/data-structures.hpp>
 #include <openssl/x509.h>
 #include <optional>
+#include <state/gpu.hpp>
 #include <state/serialised_config.hpp>
 #include <utility>
 #include <vector>
@@ -80,6 +81,11 @@ struct Config {
   std::string config_source;
   bool support_hevc;
   bool support_av1;
+
+  /**
+   * The pool of GPUs available to Wolf, sessions are pinned to one of these by the load balancer.
+   */
+  GpuPool gpus;
 
   /**
    * Mutable, paired_clients will be loaded up on startup
@@ -154,6 +160,12 @@ struct PairCache {
 using SessionsAtoms = std::shared_ptr<immer::atom<immer::vector<events::StreamSession>>>;
 
 /**
+ * A map of Gstreamer video contexts keyed by render node, one entry per GPU.
+ */
+using GstContextMap = immer::map<std::string, gst_video_context::gst_context_ptr>;
+using GstContextMapAtom = std::shared_ptr<immer::atom<GstContextMap>>;
+
+/**
  * The whole application state as a composition of immutable datastructures
  */
 struct AppState {
@@ -186,10 +198,16 @@ struct AppState {
   std::shared_ptr<immer::atom<immer::vector<events::Lobby>>> lobbies;
 
   /**
-   * A single global Gstreamer video context shared with all the pipelines
+   * Mutable, keeps track of how many sessions are currently pinned to each GPU.
    */
-  std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> gst_context =
-      std::make_shared<immer::atom<gst_video_context::gst_context_ptr>>();
+  std::shared_ptr<immer::atom<GpuAssignments>> gpu_assignments =
+      std::make_shared<immer::atom<GpuAssignments>>();
+
+  /**
+   * A Gstreamer video context per GPU (keyed by render node), shared with all the pipelines using
+   * that device. Contexts are lazily created the first time a GPU needs one.
+   */
+  GstContextMapAtom gst_context = std::make_shared<immer::atom<GstContextMap>>();
 
   /**
    * A list of all currently running (and paused) streaming sessions

@@ -171,6 +171,17 @@ announce(const RTSP_PACKET &req, const events::StreamSession &session) {
   bool video_format_av1 = args["x-nv-vqos[0].bitStreamFormat"].value_or(0) == 2;
   auto csc = args["x-nv-video[0].encoderCscMode"].value_or(0);
 
+  // If the assigned GPU can't encode the requested codec, fall back to a supported one
+  if (video_format_av1 && !session.app->support_av1) {
+    logs::log(logs::warning, "[RTSP] Client requested AV1 but the assigned GPU doesn't support it, falling back");
+    video_format_av1 = false;
+    video_format_hevc = session.app->support_hevc;
+  }
+  if (video_format_hevc && !session.app->support_hevc) {
+    logs::log(logs::warning, "[RTSP] Client requested HEVC but the assigned GPU doesn't support it, falling back");
+    video_format_hevc = false;
+  }
+
   // Video session
   moonlight::DisplayMode display = {.width = args["x-nv-video[0].clientViewportWd"].value(),
                                     .height = args["x-nv-video[0].clientViewportHt"].value(),
@@ -219,7 +230,7 @@ announce(const RTSP_PACKET &req, const events::StreamSession &session) {
   events::VideoSession video = {
       .display_mode = {.width = display.width, .height = display.height, .refreshRate = display.refreshRate},
       .gst_pipeline = gst_pipeline,
-      .render_node = session.app->render_node,
+      .render_node = session.render_node,
 
       .session_id = session.session_id,
 

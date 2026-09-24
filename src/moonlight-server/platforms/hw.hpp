@@ -19,6 +19,12 @@ std::vector<std::string> linked_devices(std::string_view gpu);
  */
 std::string get_render_node_name(std::string_view render_node);
 
+/**
+ * Enumerates all the render nodes available on the system (ex: /dev/dri/renderD128, /dev/dri/renderD129)
+ * in a stable (lexicographic) order. Returns an empty list on platforms without DRM render nodes.
+ */
+std::vector<std::string> list_render_nodes();
+
 enum GPU_VENDOR {
   NVIDIA,
   AMD,
