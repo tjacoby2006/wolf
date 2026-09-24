@@ -1,5 +1,5 @@
 #include "gst-video-context.hpp"
-#include <algorithm>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <gst/cuda/gstcudacontext.h>
@@ -8,7 +8,6 @@
 #include <helpers/logger.hpp>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
-#include <vector>
 
 namespace gst_video_context {
 
@@ -72,61 +71,27 @@ bool isNvidiaGpu(const std::string &pciBusId) {
 }
 
 std::optional<int> getCudaDeviceIndexFromPciBusId(const std::string &pciBusId) {
-  fs::path gpusDir = "/proc/driver/nvidia/gpus";
-
-  std::error_code ec;
-  if (!fs::exists(gpusDir, ec) || !fs::is_directory(gpusDir, ec)) {
+  // /proc/driver/nvidia/gpus/*/information reports the *kernel device minor*,
+  // not the CUDA ordinal used by gst_cuda_context_new and nvh265deviceNenc.
+  // Ask the CUDA driver for its ordinal using the DRM device's PCI identity.
+  using cuda_init = int (*)(unsigned int);
+  using cuda_device_from_pci = int (*)(int *, const char *);
+  void *library = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+  if (!library) {
+    logs::log(logs::error, "Unable to load CUDA driver for GPU {}: {}", pciBusId, dlerror());
     return std::nullopt;
   }
-
-  auto normalize = [](std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), ::tolower);
-    return value;
-  };
-
-  for (const auto &entry : fs::directory_iterator(gpusDir, ec)) {
-    if (!entry.is_directory()) {
-      continue;
-    }
-
-    std::string busId = entry.path().filename().string();
-    logs::log(logs::debug, "Found Nvidia GPU: {}", busId);
-
-    if (normalize(busId) != normalize(pciBusId)) {
-      continue;
-    }
-
-    // CUDA ordinals are not guaranteed to follow PCI bus ordering. The
-    // NVIDIA kernel driver records the CUDA ordinal in Device Minor, and
-    // that remains correct when Docker exposes only a subset of GPUs.
-    std::ifstream info_file(entry.path() / "information");
-    if (!info_file.is_open()) {
-      continue;
-    }
-
-    std::string line;
-    while (std::getline(info_file, line)) {
-      constexpr std::string_view prefix = "Device Minor:";
-      if (line.rfind(prefix, 0) != 0) {
-        continue;
-      }
-      auto value = line.substr(prefix.size());
-      value.erase(0, value.find_first_not_of(" \t"));
-      try {
-        const auto device_index = std::stoi(value);
-        logs::log(logs::debug, "PCI bus ID {} mapped to CUDA device index {}", busId, device_index);
-        return device_index;
-      } catch (const std::exception &) {
-        return std::nullopt;
-      }
-    }
+  auto close_library = std::unique_ptr<void, decltype(&dlclose)>(library, dlclose);
+  auto cu_init = reinterpret_cast<cuda_init>(dlsym(library, "cuInit"));
+  auto cu_device_from_pci = reinterpret_cast<cuda_device_from_pci>(dlsym(library, "cuDeviceGetByPCIBusId"));
+  int device_index = -1;
+  if (!cu_init || !cu_device_from_pci || cu_init(0) != 0 ||
+      cu_device_from_pci(&device_index, pciBusId.c_str()) != 0 || device_index < 0) {
+    logs::log(logs::error, "CUDA cannot map PCI GPU {} to a CUDA device", pciBusId);
+    return std::nullopt;
   }
-
-  logs::log(logs::warning,
-            "PCI bus ID {} not found in NVIDIA GPU information under {}",
-            pciBusId, gpusDir.string());
-
-  return std::nullopt;
+  logs::log(logs::info, "PCI bus ID {} mapped to CUDA device ordinal {}", pciBusId, device_index);
+  return device_index;
 }
 
 std::optional<int> getCudaDeviceFromDri(const std::string &device_path) {
@@ -168,7 +133,12 @@ bool set_context(gst_context_ptr context, GstElement *element) {
 }
 
 cuda_context_ptr create_cuda_context(const std::string &device_path) {
-  auto device_id = getCudaDeviceFromDri(device_path).value_or(0);
+  auto detected_device = getCudaDeviceFromDri(device_path);
+  if (!detected_device) {
+    logs::log(logs::error, "Refusing to create a CUDA context on the default GPU for {}", device_path);
+    return nullptr;
+  }
+  auto device_id = *detected_device;
   logs::log(logs::info, "Creating CUDA context for device {} (detected CUDA device ID: {})", device_path, device_id);
   auto cuda_ctx = gst_cuda_context_new(device_id);
   if (cuda_ctx) {
