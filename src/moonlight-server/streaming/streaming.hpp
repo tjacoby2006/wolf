@@ -15,6 +15,9 @@
 
 namespace streaming {
 
+/** Replace generic NVENC factories with the selected CUDA device's factories. */
+std::string bind_nvidia_encoder(std::string pipeline, int device_index);
+
 using namespace wolf::core;
 using boost::asio::ip::udp;
 

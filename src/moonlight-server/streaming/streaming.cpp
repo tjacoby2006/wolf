@@ -35,6 +35,18 @@ static std::string bind_encoder_to_render_node(std::string pipeline, std::string
   return pipeline;
 }
 
+std::string bind_nvidia_encoder(std::string pipeline, int device_index) {
+  // GstNvEnc selects its device when the factory constructs the encoder;
+  // cuda-device-id is read-only on these instances. Match whole factory names
+  // so already-scoped elements and unrelated properties remain untouched.
+  for (const auto *codec : {"nvh264", "nvh265", "nvav1"}) {
+    pipeline = std::regex_replace(pipeline,
+                                  std::regex(fmt::format(R"(\b{}enc\b)", codec)),
+                                  fmt::format("{}device{}enc", codec, device_index));
+  }
+  return pipeline;
+}
+
 struct GstBusData {
   std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready;
   gst_element_ptr wayland_plugin;
@@ -399,8 +411,40 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
                            std::shared_ptr<udp::socket> video_socket) {
   auto [color_range, color_space] = get_color_params(video_session);
 
+  auto pipeline_template = bind_encoder_to_render_node(video_session->gst_pipeline, video_session->render_node);
+  if (get_vendor(video_session->render_node) == NVIDIA) {
+    const auto device_index = gst_video_context::getCudaDeviceFromDri(video_session->render_node);
+    if (!device_index) {
+      logs::log(logs::error,
+                "Cannot identify CUDA device for {}, refusing to encode on the wrong GPU",
+                video_session->render_node);
+      return;
+    }
+    const auto scoped = bind_nvidia_encoder(pipeline_template, *device_index);
+    if (scoped != pipeline_template) {
+      // GStreamer registers device-specific factories at plugin discovery time.
+      // Never silently fall back to the generic (default-GPU) encoder.
+      for (const auto *codec : {"nvh264", "nvh265", "nvav1"}) {
+        const auto factory_name = fmt::format("{}device{}enc", codec, *device_index);
+        if (scoped.find(factory_name) != std::string::npos) {
+          auto *factory = gst_element_factory_find(factory_name.c_str());
+          if (!factory) {
+            logs::log(logs::error,
+                      "Selected GPU {} has no encoder factory {}",
+                      video_session->render_node,
+                      factory_name);
+            return;
+          }
+          gst_object_unref(factory);
+        }
+      }
+      logs::log(logs::info, "Using NVIDIA encoder on {} (CUDA device {})", video_session->render_node, *device_index);
+      pipeline_template = scoped;
+    }
+  }
+
   auto pipeline = fmt::format(
-      fmt::runtime(bind_encoder_to_render_node(video_session->gst_pipeline, video_session->render_node)),
+      fmt::runtime(pipeline_template),
       fmt::arg("session_id", video_session->session_id),
       fmt::arg("width", video_session->display_mode.width),
       fmt::arg("height", video_session->display_mode.height),

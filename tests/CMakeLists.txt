@@ -24,6 +24,7 @@ set(SRC_LIST
         testWolfAPI.cpp
         testBatchedSend.cpp)
 list(APPEND SRC_LIST testGPUScheduler.cpp)
+list(APPEND SRC_LIST testNvidiaEncoderBinding.cpp)
 
 option(TEST_RUST_WAYLAND "Test our custom Rust wayland compositor" ON)
 if (UNIX AND NOT APPLE)
