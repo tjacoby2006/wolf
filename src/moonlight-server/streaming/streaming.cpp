@@ -37,6 +37,11 @@ static std::string bind_encoder_to_render_node(std::string pipeline, std::string
 
 std::string bind_nvidia_encoder(std::string pipeline, int device_index) {
   // GstNvEnc selects its device when the factory constructs the encoder;
+  // the generic factory represents CUDA device 0. GStreamer registers
+  // deviceN factories only for additional devices, not device0.
+  if (device_index == 0) {
+    return pipeline;
+  }
   // cuda-device-id is read-only on these instances. Match whole factory names
   // so already-scoped elements and unrelated properties remain untouched.
   for (const auto *codec : {"nvh264", "nvh265", "nvav1"}) {
@@ -438,9 +443,9 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
           gst_object_unref(factory);
         }
       }
-      logs::log(logs::info, "Using NVIDIA encoder on {} (CUDA device {})", video_session->render_node, *device_index);
       pipeline_template = scoped;
     }
+    logs::log(logs::info, "Using NVIDIA encoder on {} (CUDA device {})", video_session->render_node, *device_index);
   }
 
   auto pipeline = fmt::format(
