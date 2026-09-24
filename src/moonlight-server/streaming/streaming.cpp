@@ -32,17 +32,6 @@ static std::string bind_encoder_to_render_node(std::string pipeline, std::string
                                   std::regex(fmt::format("va{}enc", technology)),
                                   fmt::format("va{}{}enc", node_name, technology));
   }
-  // GstNvEnc exposes cuda-device-id as construct-only. It cannot be changed
-  // after gst_parse_launch(), so place the physical GPU's CUDA ordinal in the
-  // launch description before the encoder element is constructed.
-  if (pipeline.find("cuda-device-id") == std::string::npos) {
-    if (const auto cuda_device = gst_video_context::getCudaDeviceFromDri(std::string(render_node))) {
-      pipeline = std::regex_replace(pipeline,
-                                    std::regex(R"(\b(nvh(?:264|265|av1)enc)\b)"),
-                                    fmt::format("$1 cuda-device-id={}", *cuda_device),
-                                    std::regex_constants::format_first_only);
-    }
-  }
   return pipeline;
 }
 
@@ -136,6 +125,13 @@ void start_video_producer(const std::string &session_id,
       std::make_shared<NeedContextData>(NeedContextData{.device_path = render_node, .context_provider = context_provider});
   run_pipeline(pipeline, [=](auto pipeline) {
     logs::log(logs::debug, "Setting up waylanddisplaysrc");
+
+    // Install the context before the NULL -> READY transition. GstBin
+    // propagates it to the source and CUDA elements, avoiding an implicit
+    // context on CUDA device 0 before NEED_CONTEXT can be handled.
+    if (auto context = context_provider->get_or_create(render_node)) {
+      gst_video_context::set_context(context, pipeline.get());
+    }
 
     auto wayland_plugin_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_wayland_source");
     auto wayland_plugin_ptr = gst_element_ptr(wayland_plugin_el, ::gst_object_unref);
@@ -435,6 +431,12 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
   std::shared_ptr<NeedContextData> ctx_data_ptr = std::make_shared<NeedContextData>(
       NeedContextData{.device_path = video_session->render_node, .context_provider = context_provider});
   run_pipeline(pipeline, [video_session, event_bus, udp_sink, ctx_data_ptr](auto pipeline) {
+    // cuda-device-id on current nvh*enc elements is read-only. GPU selection
+    // must be made with a CUDA GstContext before any element changes state.
+    if (auto context = ctx_data_ptr->context_provider->get_or_create(ctx_data_ptr->device_path)) {
+      gst_video_context::set_context(context, pipeline.get());
+    }
+
     if (auto app_sink_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_udp_sink")) {
       logs::log(logs::debug, "Setting up wolf_udp_sink");
       g_assert(GST_IS_APP_SINK(app_sink_el));

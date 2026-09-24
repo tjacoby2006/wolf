@@ -17,6 +17,12 @@ using cuda_context_ptr = std::shared_ptr<GstCudaContext>;
 struct GstVideoContext {
   cuda_context_ptr cuda_context;
   GstContext *context;
+
+  ~GstVideoContext() {
+    if (context) {
+      gst_context_unref(context);
+    }
+  }
 };
 
 bool init() {
@@ -151,6 +157,14 @@ bool set_context(gst_context_ptr context, GstMessage *msg) {
     logs::log(logs::debug, "Received NEED_CONTEXT for type {}, but it is not supported", context_type);
   }
   return false;
+}
+
+bool set_context(gst_context_ptr context, GstElement *element) {
+  if (!context || !element) {
+    return false;
+  }
+  gst_element_set_context(element, context->context);
+  return true;
 }
 
 cuda_context_ptr create_cuda_context(const std::string &device_path) {

@@ -40,4 +40,7 @@ gst_context_ptr need_context_for_device(const std::string &device_path, GstMessa
 
 bool set_context(gst_context_ptr context, GstMessage *msg);
 
+/** Set the selected GPU context on a pipeline before it changes state. */
+bool set_context(gst_context_ptr context, GstElement *element);
+
 } // namespace gst_video_context

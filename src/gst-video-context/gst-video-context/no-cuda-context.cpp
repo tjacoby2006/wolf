@@ -24,4 +24,8 @@ bool set_context(gst_context_ptr context, GstMessage *msg) {
   return false;
 }
 
+bool set_context(gst_context_ptr context, GstElement *element) {
+  return false;
+}
+
 } // namespace gst_video_context
