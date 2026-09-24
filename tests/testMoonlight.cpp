@@ -604,17 +604,22 @@ TEST_CASE("resume carries over the assigned GPU", "[HTTP]") {
   REQUIRE(encoder_node == assigned);
 
   SECTION("the compositor and devices are carried over too") {
-    auto display = decltype(session->wayland_display){};
-    auto mouse = decltype(session->mouse){};
-    auto keyboard = decltype(session->keyboard){};
+    auto display = std::make_shared<immer::atom<wolf::core::virtual_display::wl_state_ptr>>();
+    auto mouse = std::make_shared<std::optional<events::MouseTypes>>();
+    auto keyboard = std::make_shared<std::optional<events::KeyboardTypes>>();
+    auto sink = std::make_shared<immer::atom<std::shared_ptr<wolf::core::audio::VSink>>>();
     session->wayland_display = display;
     session->mouse = mouse;
     session->keyboard = keyboard;
+    session->audio_sink = sink;
 
-    state::carry_over_resumed_session(*session, *resumed);
+    auto resumed2 = endpoints::https::create_run_session(headers, "0.0.0.0", client, app_state, *session->app);
+    state::carry_over_resumed_session(*session, *resumed2);
 
-    REQUIRE(resumed->wayland_display == display);
-    REQUIRE(resumed->mouse == mouse);
-    REQUIRE(resumed->keyboard == keyboard);
+    // Same handles, not fresh ones: the container already has these devices plugged in.
+    REQUIRE(resumed2->wayland_display == display);
+    REQUIRE(resumed2->mouse == mouse);
+    REQUIRE(resumed2->keyboard == keyboard);
+    REQUIRE(resumed2->audio_sink == sink);
   }
 }
