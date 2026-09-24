@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <optional>
 
 namespace gst_video_context {
 
@@ -12,6 +13,9 @@ namespace gst_video_context {
  * Dynamically links and load up the required libraries; needs to be called once.
  */
 bool init();
+
+/** Return the CUDA ordinal corresponding to a DRM render node, when it is an NVIDIA GPU. */
+std::optional<int> getCudaDeviceFromDri(const std::string &device_path);
 
 struct GstVideoContext;
 using gst_context_ptr = std::shared_ptr<GstVideoContext>;

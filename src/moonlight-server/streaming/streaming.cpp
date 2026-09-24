@@ -35,6 +35,33 @@ static std::string bind_encoder_to_render_node(std::string pipeline, std::string
   return pipeline;
 }
 
+static void bind_cuda_encoder_to_render_node(GstElement *pipeline, const std::string &render_node) {
+  const auto cuda_device = gst_video_context::getCudaDeviceFromDri(render_node);
+  if (!cuda_device) {
+    return;
+  }
+
+  auto iterator = gst_bin_iterate_recurse(GST_BIN(pipeline));
+  GValue item = G_VALUE_INIT;
+  while (gst_iterator_next(iterator, &item) == GST_ITERATOR_OK) {
+    auto *element = GST_ELEMENT(g_value_get_object(&item));
+    auto *factory = gst_element_get_factory(element);
+    const auto *factory_name = factory ? gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)) : nullptr;
+    if (factory_name && g_str_has_prefix(factory_name, "nvh") &&
+        g_object_class_find_property(G_OBJECT_GET_CLASS(element), "cuda-device-id")) {
+      g_object_set(element, "cuda-device-id", *cuda_device, nullptr);
+      logs::log(logs::debug,
+                "[GSTREAMER] Bound {} encoder to CUDA device {} for render node {}",
+                factory_name,
+                *cuda_device,
+                render_node);
+    }
+    g_value_reset(&item);
+  }
+  g_value_unset(&item);
+  gst_iterator_free(iterator);
+}
+
 struct GstBusData {
   std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready;
   gst_element_ptr wayland_plugin;
@@ -424,6 +451,11 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
   std::shared_ptr<NeedContextData> ctx_data_ptr = std::make_shared<NeedContextData>(
       NeedContextData{.device_path = video_session->render_node, .context_provider = context_provider});
   run_pipeline(pipeline, [video_session, event_bus, udp_sink, ctx_data_ptr](auto pipeline) {
+    // NEED_CONTEXT selects CUDA memory operations, but nvh264/nvh265/nvav1enc
+    // also have an explicit device property and otherwise default to CUDA 0.
+    // Set it before PLAYING so the encoder cannot silently use the first GPU.
+    bind_cuda_encoder_to_render_node(pipeline.get(), video_session->render_node);
+
     if (auto app_sink_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_udp_sink")) {
       logs::log(logs::debug, "Setting up wolf_udp_sink");
       g_assert(GST_IS_APP_SINK(app_sink_el));

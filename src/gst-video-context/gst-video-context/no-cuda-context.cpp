@@ -12,6 +12,10 @@ bool init() {
   return true;
 }
 
+std::optional<int> getCudaDeviceFromDri(const std::string &) {
+  return std::nullopt;
+}
+
 gst_context_ptr need_context_for_device(const std::string &device_path, GstMessage *msg) {
   return nullptr;
 }
