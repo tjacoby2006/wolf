@@ -58,7 +58,7 @@ static void need_context_handler(GstBus *bus, GstMessage *msg, gpointer data) {
   auto ctx_data = static_cast<NeedContextData *>(data);
 
   // Reuse the context already created for this GPU (if any)
-  auto current = ctx_data->gst_context->load();
+  auto current = ctx_data->gst_context->load().get();
   if (auto *existing = current.find(ctx_data->device_path)) {
     logs::log(logs::debug, "Context already set for {}, passing it to the pipeline.", ctx_data->device_path);
     gst_video_context::set_context(*existing, msg);
