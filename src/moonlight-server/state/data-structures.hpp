@@ -81,6 +81,8 @@ struct Config {
   std::string config_source;
   bool support_hevc;
   bool support_av1;
+  /** GPUs configured for per-session scheduling. Empty means auto-discover. */
+  std::vector<wolf::config::GPUConfig> gpus;
 
   /**
    * Mutable, paired_clients will be loaded up on startup
