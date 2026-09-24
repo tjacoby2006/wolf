@@ -94,12 +94,18 @@ TEST_CASE("LocalState pairing information", "[LocalState]") {
                        "QPr3DuUuTCIdxacJrSoUyqakswGr82j3+Dt3dU0LWCquVeeOMhMVN+EFzjFbDJbz\n"
                        "+sNLTM2E7HeKNeIr/0oFhyA2b5Kb4vd+z1GfW38o85gDU8ni6FOmEaFTi3TdZ1yR\n"
                        "RxdKKd9k+myCNHLiyBA9K4Q2JYuUkYxZzsZrKVH7LWfH79qaMvj87iEnAgMBAAEw\n"
-                       "DQYJKoZIhvcNAQELBQADggEBADVm005jqiFEGuH6JfTKRcZU3PMmFrEmJTmvPiyh\n"
-                       "a4b75jai0hLRCzNDu6bSzlXH346YK/x7AVkSZIoD2hTpujVlHIHLoSJzkrmMxIFR\n"
-                       "sZRjh0EGaAmvDuEXADUE0MGpoWLUQumiDWwuSbEzPyr7BID68A3Q6jKwd65D2+ut\n"
-                       "snLzlErTl5fgHkLWV6plelcMgPSo4T+E7APm4LHlP5uxiixAfnhDlzuAeD5r1rsD\n"
-                       "UkrNfMfXnRzPSwXiNYHZ+UoQuchoMCSAa+kcsQ+zsdPwAJ3stwQGcfpvYhdZv1a1\n"
-                       "oPJpyCigkmv0uH4CeJ09A/6Da2uY+HIwVq85qteMVSUTtV0=\n"
+                       "DQYJKoZIhvcNAQELBQADggEPADCCAQoCggEBAKYAuR+nnhekgyOvEKPhNdGiGECe5iiPo/4g\n"
+                       "yzrXEIKggr1oTauqmBPUhVT6sGuuKE5cR0u4pHm7bcUZAeBdssPzq8IJBKRzEgeM\n"
+                       "AtoWu+MsWijbq2wSKJTLe9e0/WClk0iFopvVrhyai2hbxqlWxyTyxWVxKg4iECAg\n"
+                       "7TT9EAAuZzS5EhfOBA6+xREdDse5TzkTLWHVSNIaDgPuJiM3DXHjt64C0ubTNklO\n"
+                       "VDzU5nBYwOidi64EsznpnHT7Zhj0fhB8g7rV6n4ZEi65o6vhAbC6J4IBCBXLw9R/\n"
+                       "s8cglKED3ebS9gGE9V+0exXkCr+X6JqQ8tnuJaWoeXIWTctatB0CAwEAATANBgkq\n"
+                       "hkiG9w0BAQsFAAOCAQEAqPBqzvDjl89pZMll3Ge8RS7HeDuzgocrhOcT2jnk4ag7\n"
+                       "/TROZuISjDp6+SnL3gPEt7E2OcFAczTg3l/wbT5PFb6vM96saLm4EP0zmLfK1FnM\n"
+                       "JDRahKutP9rx6RO5OHqsUB+b4jA4W0L9UnXUoLKbjig501AUix0p52FBxu+HJ90r\n"
+                       "HlLs3Vo6nj4Z/PZXrzaz8dtQ/KJMpd/g/9xlo6BKAnRk5SI8KLhO4hW6zG0QA56j\n"
+                       "X4wnh1bwdiidqpcgyuKossLOPxbS786WmsesaAWPnpoY6M8aija+ALwNNuWWmyMg\n"
+                       "9SVDV76xJzM36Uq7Kg3QJYTlY04WmPIdJHkCtXWf9g==\n"
                        "-----END CERTIFICATE-----\n";
 
   SECTION("Checking pairing mechanism") {
@@ -118,12 +124,12 @@ TEST_CASE("LocalState pairing information", "[LocalState]") {
                         "7TT9EAAuZzS5EhfOBA6+xREdDse5TzkTLWHVSNIaDgPuJiM3DXHjt64C0ubTNklO\n"
                         "VDzU5nBYwOidi64EsznpnHT7Zhj0fhB8g7rV6n4ZEi65o6vhAbC6J4IBCBXLw9R/\n"
                         "s8cglKED3ebS9gGE9V+0exXkCr+X6JqQ8tnuJaWoeXIWTctatB0CAwEAATANBgkq\n"
-                        "hkiG9w0BAQsFAAOCAQEAnQ5+pnjzAylkoA/vi6DxxwlCxWsDS6HlPptlpY+AlY6q\n"
-                        "PvQMHxrRMGXYWl+70ja8GvvlfZLf0zj/wc8vjxFB/+P3mOLv00YBGdryIF5Fijg9\n"
-                        "h9LZ9+raPvR/xIDevubveQgX/Kcl2cX59/aaIwKPUJH4BHzRTJ2W32B8Fw1KO/sp\n"
-                        "CH7xDcplhPQ6YvTedFBBu1AcSiRpmGcOuo1+HMJZLj3ek7NrFOSjfptIStleYixj\n"
-                        "Gxy5pgOEuXuSoi3dJInrwc3dBILZBDYyBg7jPBDjRC+ld24q6/TYHBPKbmaM2iFa\n"
-                        "AXQMq/fmtPxEDHY0NguWUhGt3uooTiakv1u9zex/Cg==\n"
+                        "hkiG9w0BAQsFAAOCAQEAqPBqzvDjl89pZMll3Ge8RS7HeDuzgocrhOcT2jnk4ag7\n"
+                        "/TROZuISjDp6+SnL3gPEt7E2OcFAczTg3l/wbT5PFb6vM96saLm4EP0zmLfK1FnM\n"
+                        "JDRahKutP9rx6RO5OHqsUB+b4jA4W0L9UnXUoLKbjig501AUix0p52FBxu+HJ90r\n"
+                        "HlLs3Vo6nj4Z/PZXrzaz8dtQ/KJMpd/g/9xlo6BKAnRk5SI8KLhO4hW6zG0QA56j\n"
+                        "X4wnh1bwdiidqpcgyuKossLOPxbS786WmsesaAWPnpoY6M8aija+ALwNNuWWmyMg\n"
+                        "9SVDV76xJzM36Uq7Kg3QJYTlY04WmPIdJHkCtXWf9g==\n"
                         "-----END CERTIFICATE-----";
 
     REQUIRE(state::get_client_via_ssl(cfg, another_cert).has_value() == false);
@@ -557,4 +563,58 @@ TEST_CASE("Multiple users", "[HTTP]") {
 
   REQUIRE(session4->video_stream_port == 48100);
   REQUIRE(session4->audio_stream_port == 48200);
+}
+
+/**
+ * Regression: a resume must not lose the GPU the load balancer assigned.
+ *
+ * `resume` rebuilds the session from scratch, so anything not explicitly carried over is reset. When
+ * `assigned_render_node` was dropped, the encoder was re-pointed at the app's default node while the
+ * compositor kept rendering on the assigned one — nvenc then received `CUDAMemory` from a GPU it
+ * cannot address, which corrupted the process-wide CUDA context and took down *every* running
+ * session (`CUDA_ERROR_UNKNOWN` / `CUDA_ERROR_ILLEGAL_ADDRESS`).
+ */
+TEST_CASE("resume carries over the assigned GPU", "[HTTP]") {
+  auto event_bus = std::make_shared<events::EventBusType>();
+  auto app_state = state::AppState{
+      .config = state::Config{},
+      .host = {},
+      .event_bus = event_bus,
+      .running_sessions = std::make_shared<immer::atom<immer::vector<events::StreamSession>>>()};
+
+  auto client = state::PairedClient{.app_state_folder = "test"};
+  auto app = events::App{.base = moonlight::App{.title = "test_app"}, .render_node = "/dev/dri/renderD128"};
+  auto headers = SimpleWeb::CaseInsensitiveMultimap{{"rikey", "1234"}, {"rikeyid", "5678"}};
+
+  auto session = endpoints::https::create_run_session(headers, "0.0.0.0", client, app_state, app);
+  // The balancer assigned a node that is *not* the app's default one.
+  const std::string assigned = "/dev/dri/renderD129";
+  REQUIRE(assigned != session->app->render_node);
+  session->assigned_render_node = assigned;
+
+  // Mirror what `resume` does: build a fresh session for the same client and carry the stream state over.
+  auto resumed = endpoints::https::create_run_session(headers, "0.0.0.0", client, app_state, *session->app);
+  REQUIRE(resumed->assigned_render_node.empty()); // fresh sessions start unassigned
+  state::carry_over_resumed_session(*session, *resumed);
+
+  // The encoder resolves its node as `assigned_render_node.empty() ? app->render_node : assigned`,
+  // so without the carry-over this silently becomes D128 while the compositor still renders on D129.
+  const std::string encoder_node =
+      resumed->assigned_render_node.empty() ? resumed->app->render_node : resumed->assigned_render_node;
+  REQUIRE(encoder_node == assigned);
+
+  SECTION("the compositor and devices are carried over too") {
+    auto display = decltype(session->wayland_display){};
+    auto mouse = decltype(session->mouse){};
+    auto keyboard = decltype(session->keyboard){};
+    session->wayland_display = display;
+    session->mouse = mouse;
+    session->keyboard = keyboard;
+
+    state::carry_over_resumed_session(*session, *resumed);
+
+    REQUIRE(resumed->wayland_display == display);
+    REQUIRE(resumed->mouse == mouse);
+    REQUIRE(resumed->keyboard == keyboard);
+  }
 }

@@ -150,14 +150,9 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
   if (old_session) {
     auto new_session =
         create_run_session(request->parse_query_string(), client_ip, current_client, state, *old_session->app);
-    // Carry over the old session display handle
-    new_session->wayland_display = std::move(old_session->wayland_display);
-    // Carry over the old session devices, they'll be already plugged into the container
-    new_session->mouse = std::move(old_session->mouse);
-    new_session->keyboard = std::move(old_session->keyboard);
-    new_session->joypads = std::move(old_session->joypads);
-    new_session->pen_tablet = std::move(old_session->pen_tablet);
-    new_session->touch_screen = std::move(old_session->touch_screen);
+    // The compositor, the input devices and — crucially — the GPU the load balancer assigned all
+    // belong to the client's stream rather than to this RTSP session, so they survive the swap.
+    state::carry_over_resumed_session(*old_session, *new_session);
 
     state->running_sessions->update([&old_session, new_session](const immer::vector<events::StreamSession> ses_v) {
       return state::remove_session(ses_v, old_session.value()).push_back(*new_session);
@@ -166,10 +161,10 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
     auto rtsp_ip = get_rtsp_ip_string(get_host_ip<SimpleWeb::HTTPS>(request, state), *new_session);
     auto xml = moonlight::launch_resume(rtsp_ip, std::to_string(get_port(state::RTSP_SETUP_PORT)));
     send_xml<SimpleWeb::HTTPS>(response, SimpleWeb::StatusCode::success_ok, xml);
-  } else {
-    logs::log(logs::warning, "[HTTPS] Received resume event from an unregistered session, ip: {}", client_ip);
+    return;
   }
 
+  logs::log(logs::warning, "[HTTPS] Received resume event from an unregistered session, ip: {}", client_ip);
   server_error<SimpleWeb::HTTPS>(response);
 }
 

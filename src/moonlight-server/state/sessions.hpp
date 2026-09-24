@@ -6,6 +6,7 @@
 #include <immer/vector.hpp>
 #include <optional>
 #include <range/v3/view.hpp>
+#include <utility>
 #include <state/config.hpp>
 #include <state/serialised_config.hpp>
 
@@ -167,4 +168,35 @@ inline immer::vector<events::StreamSession> add_session(const immer::vector<even
                                                         const events::StreamSession &session) {
   return remove_session(sessions, session).push_back(session);
 }
+
+/**
+ * Carry the state that belongs to the *client's stream* — rather than to a single RTSP session —
+ * from the session being replaced onto the fresh one a resume builds.
+ *
+ * A resume rebuilds the session from scratch (new RTP secrets, new ports), but the GPU the load
+ * balancer assigned, the compositor and the virtual input devices all live as long as the stream and
+ * must survive the swap. Forgetting `assigned_render_node` is the dangerous one: the encoder is
+ * re-pointed at the app's default node on the next RTSP PLAY while the compositor keeps rendering on
+ * the assigned node, so nvenc is handed `CUDAMemory` from a GPU it cannot address. That doesn't just
+ * black out the session — it corrupts the process-wide CUDA context and cascades
+ * `CUDA_ERROR_UNKNOWN` / `CUDA_ERROR_ILLEGAL_ADDRESS` (and Rust compositor panics) into every other
+ * running session.
+ */
+inline void carry_over_resumed_session(events::StreamSession &from, events::StreamSession &to) {
+  // The GPU assignment lives with the stream, not the RTSP session: the compositor keeps rendering
+  // there across a pause/resume, so the encoder must follow it.
+  to.assigned_render_node = from.assigned_render_node;
+  // The compositor and the virtual input devices are already wired into the running container;
+  // reusing them is the whole point of resume.
+  to.wayland_display = std::move(from.wayland_display);
+  to.mouse = std::move(from.mouse);
+  to.keyboard = std::move(from.keyboard);
+  to.joypads = std::move(from.joypads);
+  to.pen_tablet = std::move(from.pen_tablet);
+  to.touch_screen = std::move(from.touch_screen);
+  // The PulseAudio virtual sink is created once with the runner and removed when the session ends.
+  // Dropping it here would leak the sink, since teardown deletes it through this handle.
+  to.audio_sink = std::move(from.audio_sink);
+}
+
 } // namespace state
