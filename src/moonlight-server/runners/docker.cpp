@@ -87,18 +87,18 @@ void RunDocker::run(std::string_view session_id,
   auto final_json_opts = this->base_create_json;
   if (get_vendor(render_node) == NVIDIA && !utils::get_env("NVIDIA_DRIVER_VOLUME_NAME")) {
     logs::log(logs::info, "NVIDIA_DRIVER_VOLUME_NAME not set, assuming nvidia driver toolkit is installed..");
+    std::string selected_device = "all";
+    for (const auto &device : linked_devices(render_node)) {
+      constexpr std::string_view prefix = "/dev/nvidia";
+      if (device.rfind(prefix, 0) == 0 && device.size() > prefix.size() &&
+          std::all_of(device.begin() + static_cast<std::ptrdiff_t>(prefix.size()), device.end(),
+                      [](unsigned char ch) { return ch >= '0' && ch <= '9'; })) {
+        selected_device = device.substr(prefix.size());
+        break;
+      }
+    }
     {
       auto parsed_json = utils::parse_json(final_json_opts).as_object();
-      std::string selected_device = "all";
-      for (const auto &device : linked_devices(render_node)) {
-        constexpr std::string_view prefix = "/dev/nvidia";
-        if (device.rfind(prefix, 0) == 0 && device.size() > prefix.size() &&
-            std::all_of(device.begin() + static_cast<std::ptrdiff_t>(prefix.size()), device.end(),
-                        [](unsigned char ch) { return ch >= '0' && ch <= '9'; })) {
-          selected_device = device.substr(prefix.size());
-          break;
-        }
-      }
       logs::log(logs::debug, "[DOCKER] Selected NVIDIA device {} for render node {}", selected_device, render_node);
       auto default_gpu_config = boost::json::array{
           boost::json::object{{"DeviceIDs", boost::json::array{selected_device}},
