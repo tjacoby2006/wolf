@@ -4,6 +4,7 @@
 #include <core/input.hpp>
 #include <core/virtual-display.hpp>
 #include <helpers/logger.hpp>
+#include <helpers/utils.hpp>
 #include <immer/vector_transient.hpp>
 #include <platforms/hw.hpp>
 #include <sessions/common.hpp>
@@ -94,9 +95,22 @@ void MoonlightSessionRuntime::assign_gpu(std::uint64_t session_id) {
   // Pick, probe and reserve in one atomic step. Picking without reserving would let two sessions
   // starting at the same instant read the same free GPU; probing afterwards (as a separate step)
   // would leave a dead node looking perpetually idle and therefore winning every subsequent pick.
-  auto chosen = state::pick_and_acquire(gpu_balancer, [](const state::GpuBalancer &bal, const std::vector<std::string> &avoid) {
-    return bal.pick_avoiding(avoid);
-  });
+  const auto &gpu_apps = context_.app_state->config->gpu_apps;
+  const auto default_node =
+      utils::get_env("WOLF_ENCODER_NODE", utils::get_env("WOLF_RENDER_NODE", "/dev/dri/renderD128"));
+  auto chosen = state::pick_and_acquire(
+      gpu_balancer, [&](const state::GpuBalancer &bal, const std::vector<std::string> &avoid) {
+        auto filtered = avoid;
+        for (const auto &[node, info] : bal.pool) {
+          if (node != default_node) {
+            auto apps = gpu_apps.find(node);
+            if (apps == gpu_apps.end() || !apps->second.contains(session->app->base.id)) {
+              filtered.push_back(node);
+            }
+          }
+        }
+        return bal.pick_avoiding(filtered);
+      });
 
   if (!chosen.has_value()) {
     logs::log(logs::error, "[SESSION] No available GPU for session {}", session_id);
@@ -106,15 +120,21 @@ void MoonlightSessionRuntime::assign_gpu(std::uint64_t session_id) {
 
   logs::log(logs::info, "[SESSION] Assigned GPU {} to session {}", *chosen, session_id);
 
+  if (*chosen != default_node) {
+    auto node_apps = gpu_apps.find(*chosen);
+    session->app = node_apps->second.at(session->app->base.id);
+  }
+
   // Record the assignment on the session so the runner and teardown can see it.
   session->assigned_render_node = *chosen;
   context_.app_state->running_sessions->update(
-      [node = *chosen, id = session_id](const immer::vector<events::StreamSession> &sessions) {
+      [node = *chosen, id = session_id, app = session->app](const immer::vector<events::StreamSession> &sessions) {
         auto v = sessions.transient();
         for (std::size_t i = 0; i < v.size(); ++i) {
           if (v[i].session_id == id) {
             auto updated = v[i];
             updated.assigned_render_node = node;
+            updated.app = app;
             v.set(i, updated);
           }
         }

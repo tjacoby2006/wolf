@@ -238,6 +238,67 @@ Config load_or_default(const std::string &source,
                   ranges::to<ProfilesList>();
   auto profiles_atom = std::make_shared<immer::atom<ProfilesList>>(profiles);
 
+  std::map<std::string, std::map<std::string, std::shared_ptr<events::App>>> gpu_apps;
+  for (const auto &[node, info] : gpu_pool.pool) {
+    if (info.excluded) {
+      continue;
+    }
+    if (node == default_gst_render_node || get_vendor(node) == GPU_VENDOR::UNKNOWN) {
+      continue;
+    }
+    auto node_vendor = get_vendor(node);
+    auto node_h264 = get_encoder("h264", node, default_gst_video_settings.h264_encoders, node_vendor);
+    if (!node_h264) {
+      logs::log(logs::warning, "[GPU] No H.264 encoder available for {}; skipping node", node);
+      continue;
+    }
+    auto node_hevc = get_encoder("h265", node, default_gst_video_settings.hevc_encoders, node_vendor);
+    auto node_av1 = get_encoder("av1", node, default_gst_video_settings.av1_encoders, node_vendor);
+    auto node_video = default_base_video;
+    // Each session has its own producer on its assigned node. Keep zero-copy enabled on
+    // mixed-vendor hosts: VA consumers receive DMABuf, NVIDIA consumers receive CUDAMemory.
+    node_video.producer_buffer_caps = "video/x-raw";
+    if (use_zero_copy) {
+      auto kind = wolf::platform::encoder_kind_from_plugin(node_h264->plugin_name);
+      if (kind == wolf::platform::EncoderKind::Nvidia) {
+        node_video.producer_buffer_caps = wolf::platform::producer_buffer_caps_for(kind, {});
+      } else if (kind == wolf::platform::EncoderKind::Vaapi || kind == wolf::platform::EncoderKind::QuickSync) {
+        auto dma_caps = gstreamer::get_dma_caps("vapostproc") |
+                        ranges::views::remove_if([](const std::string &cap) {
+                          return cap.find("P010") != std::string::npos || cap.find("AR30") != std::string::npos ||
+                                 cap.find(' ') != std::string::npos;
+                        }) |
+                        ranges::to<std::vector>();
+        node_video.producer_buffer_caps = wolf::platform::producer_buffer_caps_for(kind, dma_caps);
+      }
+    }
+    node_video.h264_encoder = node_h264->encoder_pipeline;
+    node_video.hevc_encoder = node_hevc ? std::optional<std::string>(node_hevc->encoder_pipeline) : std::nullopt;
+    node_video.av1_encoder = node_av1 ? std::optional<std::string>(node_av1->encoder_pipeline) : std::nullopt;
+
+    auto node_params = [&](const GstEncoder &encoder) {
+      auto defaults = utils::get_optional(default_gst_encoder_settings, encoder.plugin_name).value_or(GstEncoderDefault{});
+      const bool node_zero_copy = use_zero_copy && node_video.producer_buffer_caps != "video/x-raw";
+      return node_zero_copy ? encoder.video_params_zero_copy.value_or(defaults.video_params_zero_copy)
+                            : encoder.video_params.value_or(defaults.video_params);
+    };
+    for (const auto &profile : cfg.profiles) {
+      auto apps = parse_apps(profile.apps,
+                             default_app_render_node,
+                             node,
+                             node_video,
+                             node_params(*node_h264),
+                             node_hevc ? node_params(*node_hevc) : "",
+                             node_av1 ? node_params(*node_av1) : "",
+                             default_base_audio,
+                             running_sessions,
+                             ev_bus)->load();
+      for (const auto &app : *apps) {
+        gpu_apps[node].emplace(app->base.id, std::make_shared<events::App>(*app));
+      }
+    }
+  }
+
   return Config{.uuid = cfg.uuid,
                 .hostname = cfg.hostname,
                 .config_source = source,
@@ -247,6 +308,7 @@ Config load_or_default(const std::string &source,
                                    wolf::platform::EncoderKind::Software,
                 .paired_clients = clients_atom,
                 .profiles = profiles_atom,
+                .gpu_apps = std::move(gpu_apps),
                 .gpu_pool = gpu_pool};
 }
 

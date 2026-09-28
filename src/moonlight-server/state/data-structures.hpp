@@ -87,6 +87,10 @@ struct Config {
    */
   std::shared_ptr<immer::atom<ProfilesList>> profiles;
 
+  // Preselected video configurations for each GPU and profile app. Built at config load so
+  // assignment can select the matching encoder and producer caps before the compositor starts.
+  std::map<std::string, std::map<std::string, std::shared_ptr<events::App>>> gpu_apps;
+
   /**
    * The static GPU pool (render nodes + weights/exclusions) used to initialise the load balancer.
    */

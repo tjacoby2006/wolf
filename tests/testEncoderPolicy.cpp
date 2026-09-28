@@ -82,6 +82,25 @@ TEST_CASE("select_encoder picks the first compatible and available candidate", "
   }
 }
 
+TEST_CASE("mixed AMD and NVIDIA sessions select independent zero-copy formats and encoders", "[encoder]") {
+  auto candidates = std::vector<EncoderCandidate>{
+      candidate("nvcodec", {"nvh265enc", "cudaupload", "cudaconvertscale"}, "nvh265enc"),
+      candidate("va", {"vah265enc", "vapostproc"}, "vah265enc"),
+  };
+  auto probe = probe_with({"nvh265enc", "cudaupload", "cudaconvertscale", "vah265enc", "vapostproc"});
+
+  auto amd = select_encoder("h265", candidates, GpuVendor::Amd, "renderD128", probe);
+  auto nvidia = select_encoder("h265", candidates, GpuVendor::Nvidia, "renderD129", probe);
+  REQUIRE(amd.has_value());
+  REQUIRE(nvidia.has_value());
+  REQUIRE(amd->encoder_pipeline == "vah265enc");
+  REQUIRE(nvidia->encoder_pipeline == "nvh265enc");
+  REQUIRE(producer_buffer_caps_for(encoder_kind_from_plugin(amd->plugin_name), {"NV12"}) ==
+          "video/x-raw(memory:DMABuf), drm-format={NV12}");
+  REQUIRE(producer_buffer_caps_for(encoder_kind_from_plugin(nvidia->plugin_name), {}) ==
+          "video/x-raw(memory:CUDAMemory)");
+}
+
 TEST_CASE("select_encoder uses the per-device VAAPI element on non-default nodes", "[encoder]") {
   auto candidates = std::vector<EncoderCandidate>{
       candidate("va", {"vah264enc", "vapostproc"}, "vah264enc ! queue"),
