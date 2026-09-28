@@ -263,13 +263,16 @@ Config load_or_default(const std::string &source,
       if (kind == wolf::platform::EncoderKind::Nvidia) {
         node_video.producer_buffer_caps = wolf::platform::producer_buffer_caps_for(kind, {});
       } else if (kind == wolf::platform::EncoderKind::Vaapi || kind == wolf::platform::EncoderKind::QuickSync) {
-        auto dma_caps = gstreamer::get_dma_caps("vapostproc") |
-                        ranges::views::remove_if([](const std::string &cap) {
-                          return cap.find("P010") != std::string::npos || cap.find("AR30") != std::string::npos ||
-                                 cap.find(' ') != std::string::npos;
-                        }) |
-                        ranges::to<std::vector>();
-        node_video.producer_buffer_caps = wolf::platform::producer_buffer_caps_for(kind, dma_caps);
+        // range-v3's remove_if view requires a viewable lvalue range, not the temporary
+        // returned by get_dma_caps(). Keep the source vector alive through materialisation.
+        auto required_caps = gstreamer::get_dma_caps("vapostproc");
+        auto compatible_caps = required_caps |
+                               ranges::views::remove_if([](const std::string &cap) {
+                                 return cap.find("P010") != std::string::npos ||
+                                        cap.find("AR30") != std::string::npos || cap.find(' ') != std::string::npos;
+                               }) |
+                               ranges::to<std::vector>();
+        node_video.producer_buffer_caps = wolf::platform::producer_buffer_caps_for(kind, compatible_caps);
       }
     }
     node_video.h264_encoder = node_h264->encoder_pipeline;
