@@ -106,17 +106,10 @@ std::string scope_pipeline_to_node(const std::string &pipeline,
     return pipeline;
   }
 
-  // VAAPI / QuickSync: the encoder element takes a `device=` property pointing at the render node.
+  // VA encoders do not expose a writable `device` property. Device selection is handled by
+  // select_encoder(), which chooses a per-device element when one is available.
   if (vendor == GpuVendor::Intel || vendor == GpuVendor::Amd) {
-    std::string result = pipeline;
-    for (const auto &tech : {"h264", "h265", "av1"}) {
-      for (const auto &suffix : {"enc", "lpenc"}) {
-        // Match the element name, then insert `device=...` after it if not already present.
-        std::regex re(std::string("(\\bva") + tech + std::string(suffix) + "\\b)(?!\\s*device=)");
-        result = std::regex_replace(result, re, "$1 device=" + render_node);
-      }
-    }
-    return result;
+    return pipeline;
   }
 
   // NVIDIA: the CUDA-mode nvcodec encoders (nvh264enc/nvh265enc/nvav1enc) install their

@@ -99,17 +99,20 @@ TEST_CASE("select_encoder uses the per-device VAAPI element on non-default nodes
 TEST_CASE("scope_pipeline_to_node rewrites only device-specific elements", "[encoder]") {
   auto no_nvidia = [](const std::string &) { return std::optional<std::string>{}; };
 
-  SECTION("VAAPI gets a device= property") {
-    auto out = scope_pipeline_to_node("vah264enc ! queue", "/dev/dri/renderD129", GpuVendor::Intel, no_nvidia);
-    REQUIRE(out == "vah264enc device=/dev/dri/renderD129 ! queue");
+  SECTION("VAAPI encoder does not receive an unsupported device property") {
+    auto out = scope_pipeline_to_node("vah265enc bitrate=19708 ! queue",
+                                      "/dev/dri/renderD128",
+                                      GpuVendor::Amd,
+                                      no_nvidia);
+    REQUIRE(out == "vah265enc bitrate=19708 ! queue");
   }
 
-  SECTION("VAAPI device= is not added twice") {
-    auto out = scope_pipeline_to_node("vah264enc device=/dev/dri/renderD129 ! queue",
-                                      "/dev/dri/renderD129",
-                                      GpuVendor::Intel,
-                                      no_nvidia);
-    REQUIRE(out == "vah264enc device=/dev/dri/renderD129 ! queue");
+  SECTION("VAAPI per-device encoder name remains unchanged") {
+    auto out = scope_pipeline_to_node("varenderD129h264enc ! queue",
+                                       "/dev/dri/renderD129",
+                                       GpuVendor::Intel,
+                                       no_nvidia);
+    REQUIRE(out == "varenderD129h264enc ! queue");
   }
 
   SECTION("NVIDIA switches to the per-device encoder element") {
